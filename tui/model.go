@@ -12,7 +12,7 @@ import (
 	"github.com/Rinil-Parmar/aros/memory"
 	"github.com/Rinil-Parmar/aros/state"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -26,12 +26,11 @@ const (
 	modeApproval
 )
 
-// Model is the root bubbletea model.
 type Model struct {
 	width, height int
 
 	viewport viewport.Model
-	input    textarea.Model
+	input    textinput.Model
 	spinner  spinner.Model
 
 	messages []ChatMessage
@@ -53,7 +52,6 @@ type Model struct {
 	quitting bool
 }
 
-// program is set after bubbletea starts so goroutines can Send messages back.
 var program *tea.Program
 
 func SetProgram(p *tea.Program) { program = p }
@@ -69,24 +67,25 @@ func New() *Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
 
-	ta := textarea.New()
-	ta.Placeholder = "Type a command..."
-	ta.ShowLineNumbers = false
-	ta.SetHeight(3)
-	ta.Focus()
+	ti := textinput.New()
+	ti.Placeholder = "Type a command (try: /help)"
+	ti.Prompt = ""
+	ti.CharLimit = 0
+	ti.Focus()
 
 	vp := viewport.New(80, 20)
+	vp.MouseWheelEnabled = true
 
 	return &Model{
 		spinner:  sp,
-		input:    ta,
+		input:    ti,
 		viewport: vp,
 		mode:     modeText,
 	}
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, textarea.Blink, m.bootstrap())
+	return tea.Batch(m.spinner.Tick, textinput.Blink, m.bootstrap())
 }
 
 func (m *Model) bootstrap() tea.Cmd {
@@ -121,28 +120,50 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
+		key := msg.String()
+
+		// Always-active keys
+		switch key {
+		case "ctrl+c", "ctrl+d":
 			m.quitting = true
 			return m, tea.Quit
-		case "enter":
+		}
+
+		// Scroll keys: route to viewport, NOT input
+		switch key {
+		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
+		case "shift+up":
+			m.viewport.LineUp(1)
+			return m, nil
+		case "shift+down":
+			m.viewport.LineDown(1)
+			return m, nil
+		}
+
+		// Enter → submit
+		if key == "enter" {
 			if m.busy {
-				break
+				return m, nil
 			}
 			text := strings.TrimSpace(m.input.Value())
-			m.input.Reset()
+			m.input.SetValue("")
 			if text != "" {
 				cmds = append(cmds, m.handleInput(text))
 			}
+			return m, tea.Batch(cmds...)
 		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 9
-		m.input.SetWidth(msg.Width - 4)
+		m.viewport.Height = msg.Height - 6
+		m.input.Width = msg.Width - 6
 		m.refreshViewport()
 
 	case spinner.TickMsg:
@@ -178,12 +199,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setMode(modeText, msg.prompt)
 	}
 
+	// Pass to input for typing
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	cmds = append(cmds, cmd)
-	m.viewport, cmd = m.viewport.Update(msg)
-	cmds = append(cmds, cmd)
-	m.refreshViewport()
 
 	return m, tea.Batch(cmds...)
 }
@@ -196,14 +215,21 @@ func (m *Model) handleInput(text string) tea.Cmd {
 		m.setMode(modeIdle, "")
 		lower := strings.ToLower(text)
 		if lower == "y" || lower == "yes" {
-			if m.onYes != nil {
-				go m.onYes()
+			cb := m.onYes
+			m.onYes = nil
+			m.onNo = nil
+			if cb != nil {
+				go cb()
 			}
 		} else {
-			if m.onNo != nil {
-				go m.onNo()
+			cb := m.onNo
+			m.onYes = nil
+			m.onNo = nil
+			if cb != nil {
+				go cb()
 			}
 		}
+		return nil
 
 	case modeText:
 		if m.onFreeText != nil {
@@ -219,29 +245,28 @@ func (m *Model) handleInput(text string) tea.Cmd {
 }
 
 func (m *Model) dispatch(text string) tea.Cmd {
-	lower := strings.ToLower(strings.TrimSpace(text))
+	if strings.HasPrefix(text, "/") {
+		return m.handleSlash(text)
+	}
 
 	if m.project == nil {
 		return m.initProject(text)
 	}
 
+	lower := strings.ToLower(text)
 	switch {
 	case lower == "help":
 		m.showHelp()
-
 	case lower == "status":
 		m.showStatus()
-
 	case lower == "divide":
 		m.busy = true
 		go m.runDivide()
-
 	case lower == "work":
 		m.busy = true
 		go m.runWork()
-
 	case strings.HasPrefix(lower, "plan"):
-		task := strings.TrimSpace(strings.TrimPrefix(lower, "plan"))
+		task := strings.TrimSpace(text[len("plan"):])
 		if task == "" {
 			m.onFreeText = func(t string) {
 				m.busy = true
@@ -253,9 +278,66 @@ func (m *Model) dispatch(text string) tea.Cmd {
 			m.busy = true
 			go m.runPlan(task)
 		}
+	default:
+		m.addSystem("Unknown command. Type /help for commands.")
+	}
+	return nil
+}
+
+// handleSlash routes /commands like /model, /agents, /help, /quit.
+func (m *Model) handleSlash(text string) tea.Cmd {
+	parts := strings.Fields(text)
+	cmd := strings.ToLower(parts[0])
+
+	switch cmd {
+	case "/help":
+		m.showHelp()
+
+	case "/quit", "/exit":
+		m.quitting = true
+		return tea.Quit
+
+	case "/agents":
+		m.showAgents()
+
+	case "/status":
+		m.showStatus()
+
+	case "/clear":
+		m.messages = nil
+		m.refreshViewport()
+
+	case "/model":
+		// /model <agent> <model>  OR  /model show
+		if len(parts) == 2 && parts[1] == "show" {
+			m.showAgents()
+			return nil
+		}
+		if len(parts) < 3 {
+			m.addError("Usage: /model <agent> <model>   e.g. /model claude claude-haiku-4-5")
+			m.addSystem("Or: /model show")
+			return nil
+		}
+		agentName, modelName := parts[1], strings.Join(parts[2:], " ")
+		if err := m.setAgentModel(agentName, modelName); err != nil {
+			m.addError(err.Error())
+			return nil
+		}
+		m.addSuccess(fmt.Sprintf("Set %s model → %s", agentName, modelName))
+
+	case "/judge":
+		if len(parts) < 2 {
+			m.addError("Usage: /judge <agent>   e.g. /judge claude")
+			return nil
+		}
+		if err := m.setJudge(parts[1]); err != nil {
+			m.addError(err.Error())
+			return nil
+		}
+		m.addSuccess("Judge agent → " + parts[1])
 
 	default:
-		m.addSystem("Unknown command. Type 'help' for commands.")
+		m.addSystem("Unknown slash command. Try /help")
 	}
 	return nil
 }
@@ -280,18 +362,19 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) tea.Cmd {
 
 func (m *Model) showWelcome() tea.Cmd {
 	banner := styleBanner.Render(`
- █████╗ ██████╗  ██████╗ ███████╗
-██╔══██╗██╔══██╗██╔═══██╗██╔════╝
-███████║██████╔╝██║   ██║███████╗
-██╔══██║██╔══██╗██║   ██║╚════██║
-██║  ██║██║  ██║╚██████╔╝███████║
-╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝`)
+   █████╗ ██████╗  ██████╗ ███████╗     ██████╗██╗     ██╗
+  ██╔══██╗██╔══██╗██╔═══██╗██╔════╝    ██╔════╝██║     ██║
+  ███████║██████╔╝██║   ██║███████╗    ██║     ██║     ██║
+  ██╔══██║██╔══██╗██║   ██║╚════██║    ██║     ██║     ██║
+  ██║  ██║██║  ██║╚██████╔╝███████║    ╚██████╗███████╗██║
+  ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝     ╚═════╝╚══════╝╚═╝`)
 	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: banner})
-	m.addSystem("Multi-agent AI orchestrator  •  v0.1.0")
-	m.addSystem(strings.Repeat("─", 50))
+	m.addSystem("  Multi-agent AI orchestrator  •  v0.1.0")
+	m.addSystem("  " + strings.Repeat("─", 60))
 
 	if m.project != nil {
 		m.addSystem(fmt.Sprintf("Resuming: %s  [phase: %s]", m.project.ProjectName, m.project.Phase))
+		m.showAgents()
 		m.showHelp()
 		m.setMode(modeText, "")
 		return nil
@@ -303,16 +386,38 @@ func (m *Model) showWelcome() tea.Cmd {
 }
 
 func (m *Model) showHelp() {
-	lines := []string{
-		"  plan <task>   —  generate a multi-agent plan",
-		"  divide        —  break plan into tasks and assign agents",
-		"  work          —  execute all tasks",
-		"  status        —  show current state and task list",
-		"  ctrl+c        —  quit",
-	}
 	m.addSystem("Commands:")
-	for _, l := range lines {
+	for _, l := range []string{
+		"  plan <task>      generate multi-agent plan",
+		"  divide           break plan into tasks",
+		"  work             execute tasks",
+		"  status           current state and tasks",
+		"",
+		"Slash commands:",
+		"  /model <agent> <model>     change model for an agent",
+		"  /judge <agent>             change which agent is the judge",
+		"  /agents                    show all configured agents",
+		"  /clear                     clear chat history",
+		"  /help, /quit",
+		"",
+		"Scrolling: pgup/pgdn  •  shift+up/down  •  mouse wheel",
+	} {
 		m.addSystem(l)
+	}
+}
+
+func (m *Model) showAgents() {
+	if m.cfg == nil {
+		return
+	}
+	m.addSystem(fmt.Sprintf("Judge: %s", m.cfg.Judge.Agent))
+	m.addSystem("Agents:")
+	for name, ac := range m.cfg.Agents {
+		status := "off"
+		if ac.Enabled {
+			status = "on"
+		}
+		m.addSystem(fmt.Sprintf("  %-12s [%s]  model: %s", name, status, ac.Model))
 	}
 }
 
@@ -353,34 +458,33 @@ func (m *Model) View() string {
 
 	var sb strings.Builder
 
-	// Phase bar
-	phaseLabel := " AROS "
+	phaseLabel := " AROS CLI "
 	if m.project != nil {
-		phaseLabel = fmt.Sprintf(" AROS  ·  %s  ·  %s ", m.project.ProjectName, strings.ToUpper(string(m.project.Phase)))
+		phaseLabel = fmt.Sprintf(" AROS CLI  ·  %s  ·  %s ", m.project.ProjectName, strings.ToUpper(string(m.project.Phase)))
 	}
-	bar := stylePhaseBar.Render(phaseLabel)
-	if m.width > 0 {
-		bar = stylePhaseBar.Width(m.width).Render(phaseLabel)
+	w := m.width
+	if w < 20 {
+		w = 80
 	}
-	sb.WriteString(bar + "\n")
+	sb.WriteString(stylePhaseBar.Width(w).Render(phaseLabel) + "\n")
 	sb.WriteString(m.viewport.View() + "\n")
-	sb.WriteString(styleDivider.Render(strings.Repeat("─", m.width)) + "\n")
+	sb.WriteString(styleDivider.Render(strings.Repeat("─", w)) + "\n")
 
+	prefix := styleInputPrefix.Render("❯")
 	if m.busy {
-		sb.WriteString(m.spinner.View() + " agents working...\n")
-	} else {
-		label := "you"
-		if m.prompt != "" {
-			label = m.prompt
-		}
-		sb.WriteString(styleInputPrefix.Render("["+label+"]") + "\n")
+		prefix = m.spinner.View()
 	}
-	sb.WriteString(m.input.View())
+	hint := ""
+	if m.prompt != "" && m.prompt != "y/n" {
+		hint = styleSystemMsg.Render("(" + m.prompt + ") ")
+	}
+	if m.mode == modeApproval {
+		hint = styleSystemMsg.Render("(y/n) ")
+	}
+	sb.WriteString(fmt.Sprintf(" %s %s%s", prefix, hint, m.input.View()))
 
 	return sb.String()
 }
-
-// --- message helpers ---
 
 func (m *Model) addSystem(text string) {
 	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: styleSystemMsg.Render(text)})
@@ -411,7 +515,7 @@ func (m *Model) appendStream(name, line string) {
 func (m *Model) addHuman(text string) {
 	m.messages = append(m.messages, ChatMessage{
 		Kind: kindHuman,
-		Text: styleHumanMsg.Render("[you]") + "         " + text,
+		Text: styleHumanMsg.Render("[you]") + "        " + text,
 	})
 	m.refreshViewport()
 }
@@ -459,4 +563,36 @@ func (m *Model) initProject(name string) tea.Cmd {
 		m.project = s
 		return phaseResultMsg{phase: "init"}
 	}
+}
+
+// setAgentModel updates the model for an agent and rebuilds the registry.
+func (m *Model) setAgentModel(agentName, modelName string) error {
+	if m.cfg.Agents == nil {
+		return fmt.Errorf("no agents configured")
+	}
+	ac, ok := m.cfg.Agents[agentName]
+	if !ok {
+		return fmt.Errorf("unknown agent %q", agentName)
+	}
+	ac.Model = modelName
+	ac.Enabled = true
+	m.cfg.Agents[agentName] = ac
+	return m.rebuildRegistry()
+}
+
+func (m *Model) setJudge(agentName string) error {
+	if _, ok := m.cfg.Agents[agentName]; !ok {
+		return fmt.Errorf("unknown agent %q", agentName)
+	}
+	m.cfg.Judge.Agent = agentName
+	return nil
+}
+
+func (m *Model) rebuildRegistry() error {
+	reg, err := agent.BuildRegistry(m.cfg, m.cwd)
+	if err != nil {
+		return err
+	}
+	m.reg = reg
+	return nil
 }
