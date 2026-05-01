@@ -88,13 +88,15 @@ func Load(cfgFile string) (*Config, error) {
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("judge.agent", "claude")
 
+	// Defaults use cheap/fast models to minimize token usage.
+	// Override via: aros config set agents.claude.model claude-sonnet-4-5
 	v.SetDefault("agents.claude.enabled", true)
-	v.SetDefault("agents.claude.model", "claude-sonnet-4-5")
+	v.SetDefault("agents.claude.model", "haiku")
 	v.SetDefault("agents.claude.strengths", []string{"architecture", "reasoning", "docs", "planning"})
 	v.SetDefault("agents.claude.dangerously_skip_perms", false)
 
 	v.SetDefault("agents.opencode.enabled", true)
-	v.SetDefault("agents.opencode.model", "anthropic/claude-sonnet-4-5")
+	v.SetDefault("agents.opencode.model", "openai/gpt-4o-mini")
 	v.SetDefault("agents.opencode.strengths", []string{"implementation", "debugging", "testing"})
 
 	v.SetDefault("agents.copilot.enabled", false)
