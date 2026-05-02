@@ -361,16 +361,23 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) tea.Cmd {
 }
 
 func (m *Model) showWelcome() tea.Cmd {
-	banner := styleBanner.Render(`
-   █████╗ ██████╗  ██████╗ ███████╗     ██████╗██╗     ██╗
+	w := m.width
+	if w == 0 {
+		w = 80
+	}
+	bannerText := `   █████╗ ██████╗  ██████╗ ███████╗     ██████╗██╗     ██╗
   ██╔══██╗██╔══██╗██╔═══██╗██╔════╝    ██╔════╝██║     ██║
   ███████║██████╔╝██║   ██║███████╗    ██║     ██║     ██║
   ██╔══██║██╔══██╗██║   ██║╚════██║    ██║     ██║     ██║
   ██║  ██║██║  ██║╚██████╔╝███████║    ╚██████╗███████╗██║
-  ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝     ╚═════╝╚══════╝╚═╝`)
+  ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝     ╚═════╝╚══════╝╚═╝`
+	banner := lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(styleBanner.Render(bannerText))
 	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: banner})
-	m.addSystem("  Multi-agent AI orchestrator  •  v0.1.0")
-	m.addSystem("  " + strings.Repeat("─", 60))
+	subtitle := lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(
+		styleSystemMsg.Render("Multi-agent AI orchestrator  •  v0.1.0"),
+	)
+	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: subtitle})
+	m.addSystem(strings.Repeat("─", min(w, 65)))
 
 	if m.project != nil {
 		m.addSystem(fmt.Sprintf("Resuming: %s  [phase: %s]", m.project.ProjectName, m.project.Phase))
