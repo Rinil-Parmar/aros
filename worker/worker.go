@@ -26,6 +26,9 @@ func Run(ctx context.Context, manifest *state.TaskManifest, arosDir string, reg 
 		byID[tasks[i].ID] = &tasks[i]
 	}
 
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
 	fmt.Printf("\n=== WORK PHASE ===\n%d tasks to execute (max %d concurrent)\n\n", len(tasks), maxConcurrent)
 
 	var mu sync.Mutex

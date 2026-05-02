@@ -174,11 +174,11 @@ func (m *Model) runDivide() {
 		}
 	}
 
+	assignIDs(tasks)
 	if err := detectCycles(tasks); err != nil {
 		send(phaseResultMsg{err: fmt.Errorf("dependency cycle: %w", err)})
 		return
 	}
-	assignIDs(tasks)
 
 	send(streamLineMsg{agent: "judge", line: fmt.Sprintf("Generated %d tasks:", len(tasks))})
 	send(streamLineMsg{agent: "judge", line: fmt.Sprintf("%-12s %-28s %-14s %s", "ID", "Title", "Agent", "Deps")})
@@ -229,10 +229,14 @@ func (m *Model) runWork() {
 		byID[manifest.Tasks[i].ID] = &manifest.Tasks[i]
 	}
 
-	send(streamLineMsg{agent: "aros", line: fmt.Sprintf("Starting %d tasks (max %d concurrent)...", len(manifest.Tasks), m.cfg.Work.MaxConcurrent)})
+	maxConcurrent := m.cfg.Work.MaxConcurrent
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	send(streamLineMsg{agent: "aros", line: fmt.Sprintf("Starting %d tasks (max %d concurrent)...", len(manifest.Tasks), maxConcurrent)})
 
 	dispatched := make(map[string]bool)
-	sem := make(chan struct{}, m.cfg.Work.MaxConcurrent)
+	sem := make(chan struct{}, maxConcurrent)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
