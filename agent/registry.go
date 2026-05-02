@@ -54,11 +54,7 @@ func (r Registry) Judge(judgeName string) (Agent, error) {
 	if a, ok := r[judgeName]; ok {
 		return a, nil
 	}
-	// Fallback: return first available agent
-	for _, a := range r {
-		return a, nil
-	}
-	return nil, fmt.Errorf("judge agent %q not found in registry", judgeName)
+	return nil, fmt.Errorf("judge agent %q not found in registry — check judge.agent in config", judgeName)
 }
 
 // Enabled returns all agents in the registry except the judge (for parallel plan calls).
