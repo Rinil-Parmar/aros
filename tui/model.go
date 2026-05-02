@@ -491,10 +491,15 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) tea.Cmd {
 }
 
 func (m *Model) showWelcome() tea.Cmd {
-	w := m.width
+	// Center within the left panel (viewport). Fall back to 80 before first resize.
+	w := m.leftW
+	if w == 0 {
+		w = m.width
+	}
 	if w == 0 {
 		w = 80
 	}
+
 	bannerText := `   █████╗ ██████╗  ██████╗ ███████╗     ██████╗██╗     ██╗
   ██╔══██╗██╔══██╗██╔═══██╗██╔════╝    ██╔════╝██║     ██║
   ███████║██████╔╝██║   ██║███████╗    ██║     ██║     ██║
@@ -508,7 +513,7 @@ func (m *Model) showWelcome() tea.Cmd {
 		styleSystemMsg.Render("Multi-agent AI orchestrator  •  v0.1.0"),
 	)
 	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: subtitle})
-	m.addSystem(strings.Repeat("─", min(w, 65)))
+	m.addSystem(strings.Repeat("─", min(w-2, 65)))
 
 	if m.project != nil {
 		m.addSystem(fmt.Sprintf("Resuming: %s  [phase: %s]", m.project.ProjectName, m.project.Phase))
