@@ -12,7 +12,7 @@ import (
 	"github.com/Rinil-Parmar/aros/memory"
 	"github.com/Rinil-Parmar/aros/state"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -37,7 +37,7 @@ type Model struct {
 	width, height int
 
 	viewport viewport.Model
-	input    textinput.Model
+	textarea textarea.Model
 	spinner  spinner.Model
 
 	messages []ChatMessage
@@ -60,9 +60,9 @@ type Model struct {
 	approvalQuestion string
 
 	// layout cache — computed by recalcLayout, used by view.go
-	leftW int
+	leftW  int
 	rightW int
-	colH  int
+	colH   int
 
 	quitting bool
 }
@@ -113,25 +113,29 @@ func New() *Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorBrand)
 
-	ti := textinput.New()
-	ti.Placeholder = "Type a command (try: /help)"
-	ti.Prompt = ""
-	ti.CharLimit = 0
-	ti.Focus()
+	ta := textarea.New()
+	ta.Placeholder = "Type a command (try: help)"
+	ta.Prompt = ""
+	ta.CharLimit = 0
+	ta.SetHeight(1)
+	ta.SetWidth(80)
+	ta.ShowLineNumbers = false
+	ta.KeyMap.InsertNewline.SetEnabled(true) // Shift+Enter inserts newline
+	ta.Focus()
 
 	vp := viewport.New(80, 20)
 	vp.MouseWheelEnabled = true
 
 	return &Model{
 		spinner:  sp,
-		input:    ti,
+		textarea: ta,
 		viewport: vp,
 		mode:     modeText,
 	}
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, textinput.Blink, m.bootstrap())
+	return tea.Batch(m.spinner.Tick, textarea.Blink, m.bootstrap())
 }
 
 func (m *Model) bootstrap() tea.Cmd {
@@ -170,14 +174,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		key := msg.String()
 
-		// Always-active keys
+		// Always-active quit
 		switch key {
-		case "ctrl+c", "ctrl+d":
+		case "ctrl+c":
 			m.quitting = true
 			return m, tea.Quit
 		}
 
-		// Scroll keys: route to viewport, NOT input
+		// Scroll keys: route to viewport
 		switch key {
 		case "pgup", "pgdown", "ctrl+u", "home", "end":
 			var cmd tea.Cmd
@@ -205,13 +209,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Enter → submit
-		if key == "enter" {
+		// Enter submits; Shift+Enter / Alt+Enter handled by textarea (newline)
+		if msg.Type == tea.KeyEnter && !msg.Alt {
 			if m.busy {
 				return m, nil
 			}
-			text := strings.TrimSpace(m.input.Value())
-			m.input.SetValue("")
+			text := strings.TrimSpace(m.textarea.Value())
+			m.textarea.Reset()
 			if text != "" {
 				cmds = append(cmds, m.handleInput(text))
 			}
@@ -221,13 +225,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.input.Width = msg.Width - 8
+		m.textarea.SetWidth(msg.Width - 8)
 		m.recalcLayout()
 		m.refreshViewport()
 
 	case tea.MouseMsg:
-		// Route mouse wheel to viewport — this is what makes trackpad scrolling work.
-		// Without this, mouse events only reach m.input which ignores wheel events.
 		if msg.Action == tea.MouseActionPress {
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
@@ -268,7 +270,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recalcLayout()
 
 	case freeInputMsg:
-		m.busy = false // allow Enter so the user can actually submit their response
+		m.busy = false // allow Enter so user can submit feedback
 		m.onFreeText = msg.callback
 		m.addSystem(msg.prompt)
 		m.setMode(modeText, msg.prompt)
@@ -305,10 +307,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Pass to input for typing
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
-	cmds = append(cmds, cmd)
+	// Track textarea height before update to detect growth/shrink
+	prevTAH := m.textarea.Height()
+	var taCmd tea.Cmd
+	m.textarea, taCmd = m.textarea.Update(msg)
+	cmds = append(cmds, taCmd)
+	if m.textarea.Height() != prevTAH {
+		m.recalcLayout()
+		m.refreshViewport()
+	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -387,12 +394,11 @@ func (m *Model) dispatch(text string) tea.Cmd {
 			go m.runPlan(task)
 		}
 	default:
-		m.addSystem("Unknown command. Type /help for commands.")
+		m.addSystem("Unknown command. Type help for commands.")
 	}
 	return nil
 }
 
-// handleSlash routes /commands like /model, /agents, /help, /quit.
 func (m *Model) handleSlash(text string) tea.Cmd {
 	parts := strings.Fields(text)
 	cmd := strings.ToLower(parts[0])
@@ -442,10 +448,6 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 			}
 			return nil
 		}
-		if len(parts) == 2 && parts[1] == "show" {
-			m.showAgents()
-			return nil
-		}
 		agentName, modelName := parts[1], strings.Join(parts[2:], " ")
 		if err := m.setAgentModel(agentName, modelName); err != nil {
 			m.addError(err.Error())
@@ -492,7 +494,6 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) tea.Cmd {
 }
 
 func (m *Model) showWelcome() tea.Cmd {
-	// Center within the left panel (viewport). Fall back to 80 before first resize.
 	w := m.leftW
 	if w == 0 {
 		w = m.width
@@ -507,13 +508,10 @@ func (m *Model) showWelcome() tea.Cmd {
   ██╔══██║██╔══██╗██║   ██║╚════██║    ██║     ██║     ██║
   ██║  ██║██║  ██║╚██████╔╝███████║    ╚██████╗███████╗██║
   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝     ╚═════╝╚══════╝╚═╝`
-	bannerStyle := lipgloss.NewStyle().Bold(true).Foreground(colorBrand)
-	banner := lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(bannerStyle.Render(bannerText))
-	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: banner})
-	subtitle := lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(
-		styleSystemMsg.Render("Multi-agent AI orchestrator  •  v0.1.0"),
-	)
-	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: subtitle})
+
+	// Store as kindBanner so refreshViewport re-renders it with current width on resize
+	m.messages = append(m.messages, ChatMessage{Kind: kindBanner, Body: bannerText})
+	m.addSystem("Multi-agent AI orchestrator  •  v0.1.0")
 	m.addSystem(strings.Repeat("─", min(w-2, 65)))
 
 	if m.project != nil {
@@ -545,6 +543,7 @@ func (m *Model) showHelp() {
 		"  /help, /quit",
 		"",
 		"Scrolling: pgup/pgdn  •  shift+up/down  •  mouse wheel",
+		"Multi-line input: Shift+Enter",
 	} {
 		m.addSystem(l)
 	}
@@ -595,18 +594,15 @@ func (m *Model) showStatus() {
 	}
 }
 
+// ── Message helpers ─────────────────────────────────────────────────────────────
 
 func (m *Model) addSystem(text string) {
-	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: styleSystemMsg.Render(text)})
+	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Body: text})
 	m.refreshViewport()
 }
 
 func (m *Model) addAgent(name, text string) {
-	m.messages = append(m.messages, ChatMessage{
-		Kind:      kindAgent,
-		AgentName: name,
-		Text:      agentLabel(name) + " " + text,
-	})
+	m.messages = append(m.messages, ChatMessage{Kind: kindAgent, AgentName: name, Body: text})
 	m.refreshViewport()
 }
 
@@ -614,7 +610,7 @@ func (m *Model) appendStream(name, line string) {
 	if len(m.messages) > 0 {
 		last := &m.messages[len(m.messages)-1]
 		if last.Kind == kindAgent && last.AgentName == name {
-			last.Text += "\n" + strings.Repeat(" ", 13) + line
+			last.Body += "\n" + line // raw append — indent added at render time
 			m.refreshViewport()
 			return
 		}
@@ -623,30 +619,92 @@ func (m *Model) appendStream(name, line string) {
 }
 
 func (m *Model) addHuman(text string) {
-	m.messages = append(m.messages, ChatMessage{
-		Kind: kindHuman,
-		Text: styleHumanMsg.Render("[you]") + "        " + text,
-	})
+	m.messages = append(m.messages, ChatMessage{Kind: kindHuman, Body: text})
 	m.refreshViewport()
 }
 
 func (m *Model) addError(text string) {
-	m.messages = append(m.messages, ChatMessage{Kind: kindError, Text: styleErrorMsg.Render("✗ " + text)})
+	m.messages = append(m.messages, ChatMessage{Kind: kindError, Body: text})
 	m.refreshViewport()
 }
 
 func (m *Model) addSuccess(text string) {
-	m.messages = append(m.messages, ChatMessage{Kind: kindSuccess, Text: styleSuccessMsg.Render("✓ " + text)})
+	m.messages = append(m.messages, ChatMessage{Kind: kindSuccess, Body: text})
 	m.refreshViewport()
 }
 
+// refreshViewport re-renders all messages with the current panel width and updates the viewport.
 func (m *Model) refreshViewport() {
-	var lines []string
-	for _, msg := range m.messages {
-		lines = append(lines, msg.Text)
+	w := m.leftW
+	if w == 0 {
+		w = m.viewport.Width
 	}
-	m.viewport.SetContent(strings.Join(lines, "\n"))
+	if w == 0 {
+		w = 80
+	}
+
+	var parts []string
+	for _, msg := range m.messages {
+		parts = append(parts, m.renderChatMessage(msg, w))
+	}
+	m.viewport.SetContent(strings.Join(parts, "\n"))
 	m.viewport.GotoBottom()
+}
+
+// renderChatMessage renders one ChatMessage block styled for the given width.
+func (m *Model) renderChatMessage(msg ChatMessage, w int) string {
+	bodyW := w - 6 // space for 4-char left indent + 2 safety
+	if bodyW < 20 {
+		bodyW = 20
+	}
+
+	switch msg.Kind {
+
+	case kindBanner:
+		bannerStyle := lipgloss.NewStyle().Bold(true).Foreground(colorBrand)
+		return lipgloss.NewStyle().Width(w).Align(lipgloss.Center).
+			Render(bannerStyle.Render(msg.Body))
+
+	case kindHuman:
+		arrow := lipgloss.NewStyle().Foreground(colorBrand).Bold(true).Render("▸")
+		you := lipgloss.NewStyle().Foreground(lipgloss.Color("#EC4899")).Bold(true).Render("you")
+		badge := arrow + " " + you
+		body := lipgloss.NewStyle().Foreground(colorText).Width(bodyW).Render(msg.Body)
+		indented := lipgloss.NewStyle().PaddingLeft(4).Render(body)
+		return badge + "\n" + indented + "\n"
+
+	case kindAgent:
+		dot := lipgloss.NewStyle().Foreground(agentColor(msg.AgentName)).Render("●")
+		name := lipgloss.NewStyle().Foreground(agentColor(msg.AgentName)).Bold(true).Render(msg.AgentName)
+		header := dot + " " + name
+		if msg.ModelName != "" {
+			header += " " + lipgloss.NewStyle().Foreground(colorSubtle).Render("("+msg.ModelName+")")
+		}
+		var bodyLines []string
+		for _, l := range strings.Split(msg.Body, "\n") {
+			bodyLines = append(bodyLines,
+				lipgloss.NewStyle().Foreground(colorText).Width(bodyW).Render(l))
+		}
+		body := lipgloss.NewStyle().PaddingLeft(4).Render(strings.Join(bodyLines, "\n"))
+		return header + "\n" + body + "\n"
+
+	case kindSystem:
+		return lipgloss.NewStyle().
+			Foreground(colorSubtle).Italic(true).
+			PaddingLeft(2).
+			Render(msg.Body)
+
+	case kindSuccess:
+		icon := lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render("✓")
+		text := lipgloss.NewStyle().Foreground(colorSuccess).Width(w - 5).Render(msg.Body)
+		return "  " + icon + "  " + text
+
+	case kindError:
+		icon := lipgloss.NewStyle().Foreground(colorError).Bold(true).Render("✗")
+		text := lipgloss.NewStyle().Foreground(colorError).Bold(true).Width(w - 5).Render(msg.Body)
+		return "  " + icon + "  " + text
+	}
+	return msg.Body
 }
 
 func (m *Model) setMode(mode inputMode, prompt string) {
@@ -675,7 +733,6 @@ func (m *Model) initProject(name string) tea.Cmd {
 	}
 }
 
-// setAgentModel updates the model for an agent and rebuilds the registry.
 func (m *Model) setAgentModel(agentName, modelName string) error {
 	if m.cfg.Agents == nil {
 		return fmt.Errorf("no agents configured")
