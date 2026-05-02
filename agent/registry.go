@@ -42,7 +42,7 @@ func buildAgent(name string, ac config.AgentConfig, workDir string) (Agent, erro
 	case "opencode":
 		return NewOpenCodeAdapter(ac.Model, workDir)
 	case "copilot":
-		return NewCopilotAdapter()
+		return NewCopilotAdapter(ac.Model, workDir)
 	default:
 		// Unknown agent names are treated as opencode variants (e.g., opencode-gemini)
 		return NewOpenCodeAdapter(ac.Model, workDir)
