@@ -59,6 +59,11 @@ type Model struct {
 	activity         map[string]*agentStatus
 	approvalQuestion string
 
+	// layout cache — computed by recalcLayout, used by view.go
+	leftW int
+	rightW int
+	colH  int
+
 	quitting bool
 }
 
@@ -186,6 +191,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Ctrl shortcuts
+		switch key {
+		case "ctrl+h":
+			m.showHelp()
+			return m, nil
+		case "ctrl+k":
+			m.messages = nil
+			m.refreshViewport()
+			return m, nil
+		case "ctrl+s":
+			m.showStatus()
+			return m, nil
+		}
+
 		// Enter → submit
 		if key == "enter" {
 			if m.busy {
@@ -205,6 +224,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = msg.Width - 8
 		m.recalcLayout()
 		m.refreshViewport()
+
+	case tea.MouseMsg:
+		// Route mouse wheel to viewport — this is what makes trackpad scrolling work.
+		// Without this, mouse events only reach m.input which ignores wheel events.
+		if msg.Action == tea.MouseActionPress {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				m.viewport.LineUp(3)
+				return m, nil
+			case tea.MouseButtonWheelDown:
+				m.viewport.LineDown(3)
+				return m, nil
+			}
+		}
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
