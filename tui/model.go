@@ -52,6 +52,27 @@ type Model struct {
 	quitting bool
 }
 
+// knownModels lists well-known model strings per agent type, shown as suggestions.
+var knownModels = map[string][]string{
+	"claude": {
+		"haiku",
+		"sonnet",
+		"opus",
+		"claude-haiku-4-5-20251001",
+		"claude-sonnet-4-6",
+		"claude-opus-4-7",
+	},
+	"opencode": {
+		"openai/gpt-4o-mini",
+		"openai/gpt-4o",
+		"anthropic/claude-sonnet-4-5",
+		"anthropic/claude-haiku-4-5",
+		"google/gemini-2.0-flash",
+		"google/gemini-pro",
+		"deepseek/deepseek-chat",
+	},
+}
+
 var program *tea.Program
 
 func SetProgram(p *tea.Program) { program = p }
@@ -308,14 +329,34 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		m.refreshViewport()
 
 	case "/model":
-		// /model <agent> <model>  OR  /model show
-		if len(parts) == 2 && parts[1] == "show" {
-			m.showAgents()
+		if len(parts) == 1 {
+			m.addSystem("Usage: /model <agent> <model>")
+			m.addSystem("")
+			for _, agentName := range []string{"claude", "opencode"} {
+				if models, ok := knownModels[agentName]; ok {
+					m.addSystem(fmt.Sprintf("  %s:", agentName))
+					for _, mdl := range models {
+						m.addSystem(fmt.Sprintf("    %s", mdl))
+					}
+				}
+			}
 			return nil
 		}
-		if len(parts) < 3 {
-			m.addError("Usage: /model <agent> <model>   e.g. /model claude claude-haiku-4-5")
-			m.addSystem("Or: /model show")
+		if len(parts) == 2 {
+			agentName := parts[1]
+			if models, ok := knownModels[agentName]; ok {
+				m.addSystem(fmt.Sprintf("Models for %s:", agentName))
+				for _, mdl := range models {
+					m.addSystem("  " + mdl)
+				}
+				m.addSystem(fmt.Sprintf("Usage: /model %s <model>", agentName))
+			} else {
+				m.addError(fmt.Sprintf("Unknown agent %q. Usage: /model <agent> <model>", agentName))
+			}
+			return nil
+		}
+		if len(parts) == 2 && parts[1] == "show" {
+			m.showAgents()
 			return nil
 		}
 		agentName, modelName := parts[1], strings.Join(parts[2:], " ")
