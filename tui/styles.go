@@ -124,6 +124,19 @@ var (
 	styleApprovalNo = lipgloss.NewStyle().
 			Foreground(colorSubtle)
 
+	// ── Chat message blocks ───────────────────────────────────────────────────
+
+	styleHumanBadge = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#EC4899")).
+			Bold(true)
+
+	styleMsgBody = lipgloss.NewStyle().
+			Foreground(colorText)
+
+	styleSystemLine = lipgloss.NewStyle().
+			Foreground(colorSubtle).
+			Italic(true)
+
 	// ── Misc ──────────────────────────────────────────────────────────────────
 
 	styleDivider     = lipgloss.NewStyle().Foreground(colorMuted)

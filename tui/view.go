@@ -23,8 +23,14 @@ func (m *Model) recalcLayout() {
 		approvalH = 3 // ╭ + content + ╰
 	}
 
-	// header(1) + columns(colH) + approvalH + inputBox(3) + shortcuts(1) = 5 + approvalH
-	m.colH = m.height - 5 - approvalH
+	taH := m.textarea.Height()
+	if taH < 1 {
+		taH = 1
+	}
+
+	// header(1) + colH + approvalH + border_top(1) + taH + border_bot(1) + shortcuts(1)
+	// = colH + 4 + taH + approvalH = height
+	m.colH = m.height - 4 - taH - approvalH
 	if m.colH < 3 {
 		m.colH = 3
 	}
@@ -331,15 +337,14 @@ func (m *Model) renderInputBox() string {
 	}
 	inner := w - 2
 
-	var bc lipgloss.Style
+	bc := styleInputBorderActive
 	if m.busy {
 		bc = styleInputBorderBusy
-	} else {
-		bc = styleInputBorderActive
 	}
 
 	hBar := strings.Repeat("─", inner)
 	top := bc.Render("╭" + hBar + "╮")
+	bot := bc.Render("╰" + hBar + "╯")
 
 	prefix := styleInputPrefix.Render("❯")
 	if m.busy {
@@ -347,17 +352,28 @@ func (m *Model) renderInputBox() string {
 	}
 	hint := ""
 	if m.mode == modeApproval {
-		hint = styleSystemMsg.Render("(y/n)  ")
+		hint = styleSystemMsg.Render("(y/n) ")
 	} else if m.prompt != "" && m.prompt != "y/n" {
-		hint = styleSystemMsg.Render("(" + m.prompt + ")  ")
+		hint = styleSystemMsg.Render("(" + m.prompt + ") ")
 	}
-	inputContent := fmt.Sprintf(" %s  %s%s", prefix, hint, m.input.View())
-	// Clamp to inner width so long input never overflows the right border.
-	mid := bc.Render("│") + lipgloss.NewStyle().Width(inner).MaxWidth(inner).Render(inputContent) + bc.Render("│")
 
-	bot := bc.Render("╰" + hBar + "╯")
+	// textarea.View() may return multiple lines when input grows
+	taLines := strings.Split(m.textarea.View(), "\n")
+	var midLines []string
+	for i, line := range taLines {
+		var content string
+		if i == 0 {
+			content = fmt.Sprintf(" %s  %s%s", prefix, hint, line)
+		} else {
+			content = "      " + line // align continuation under text start
+		}
+		midLine := bc.Render("│") +
+			lipgloss.NewStyle().Width(inner).MaxWidth(inner).Render(content) +
+			bc.Render("│")
+		midLines = append(midLines, midLine)
+	}
 
-	return top + "\n" + mid + "\n" + bot + "\n"
+	return top + "\n" + strings.Join(midLines, "\n") + "\n" + bot + "\n"
 }
 
 // ── Shortcuts bar ──────────────────────────────────────────────────────────────
