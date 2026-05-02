@@ -41,8 +41,8 @@ func runCommand(ctx context.Context, name string, args []string, workDir string)
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
-	if runErr != nil && outBuf.Len() == 0 {
-		return "", errBuf.String(), exitCode, fmt.Errorf("running %s: %w\nstderr: %s", name, runErr, errBuf.String())
+	if runErr != nil {
+		return outBuf.String(), errBuf.String(), exitCode, fmt.Errorf("running %s: %w\nstderr: %s", name, runErr, errBuf.String())
 	}
 	return outBuf.String(), errBuf.String(), exitCode, nil
 }
