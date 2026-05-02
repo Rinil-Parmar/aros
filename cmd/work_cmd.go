@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/Rinil-Parmar/aros/agent"
@@ -48,7 +49,7 @@ func runWork(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	cwd := arosDir[:len(arosDir)-len("/.aros")]
+	cwd := filepath.Dir(arosDir)
 	reg, err := agent.BuildRegistry(cfg, cwd)
 	if err != nil {
 		return err
