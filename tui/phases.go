@@ -33,12 +33,15 @@ func (m *Model) runPlan(task string) {
 	for i, a := range agents {
 		i, a := i, a
 		g.Go(func() error {
-			send(streamLineMsg{agent: a.Name(), line: "thinking..."})
+			agentModel := m.cfg.Agents[a.Name()].Model
+			send(agentActivityMsg{agent: a.Name(), model: agentModel, status: "running", line: "thinking..."})
+
 			tctx, cancel := context.WithTimeout(gctx, time.Duration(m.cfg.Work.AgentTimeoutSeconds)*time.Second)
 			defer cancel()
 			r, err := a.Run(tctx, buildPlanPrompt(task, memCtx))
 			if err != nil {
 				send(streamLineMsg{agent: a.Name(), line: "error: " + err.Error()})
+				send(agentActivityMsg{agent: a.Name(), status: "error", line: err.Error()})
 				plans[i] = agentPlan{name: a.Name()}
 				return nil // non-fatal
 			}
@@ -46,20 +49,26 @@ func (m *Model) runPlan(task string) {
 			for _, line := range strings.Split(r.Output, "\n") {
 				if strings.TrimSpace(line) != "" {
 					send(streamLineMsg{agent: a.Name(), line: line})
+					send(agentActivityMsg{agent: a.Name(), line: line})
 				}
 			}
+			send(agentActivityMsg{agent: a.Name(), status: "done", line: "plan ready"})
 			return nil
 		})
 	}
 	_ = g.Wait()
 
+	judgeModel := m.cfg.Agents[m.cfg.Judge.Agent].Model
 	send(streamLineMsg{agent: "judge", line: "synthesizing plans..."})
+	send(agentActivityMsg{agent: "judge", model: judgeModel, status: "running", line: "synthesizing plans..."})
+
 	judgePrompt := buildJudgePlanPrompt(task, plans, "")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	judgeResult, err := judge.Run(ctx, judgePrompt)
 	if err != nil {
+		send(agentActivityMsg{agent: "judge", status: "error", line: err.Error()})
 		send(phaseResultMsg{err: fmt.Errorf("judge: %w", err)})
 		return
 	}
@@ -67,8 +76,10 @@ func (m *Model) runPlan(task string) {
 	for _, line := range strings.Split(judgeResult.Output, "\n") {
 		if strings.TrimSpace(line) != "" {
 			send(streamLineMsg{agent: "judge", line: line})
+			send(agentActivityMsg{agent: "judge", line: line})
 		}
 	}
+	send(agentActivityMsg{agent: "judge", status: "done", line: "synthesis ready"})
 
 	synthesis := judgeResult.Output
 
@@ -87,19 +98,23 @@ func (m *Model) runPlan(task string) {
 				prompt: "What should change? (feedback for the judge)",
 				callback: func(feedback string) {
 					m.busy = true
+					send(agentActivityMsg{agent: "judge", model: judgeModel, status: "running", line: "revising plan..."})
 					retryPrompt := buildJudgePlanPrompt(task, plans, feedback)
 					ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Minute)
 					defer cancel2()
 					r2, err := judge.Run(ctx2, retryPrompt)
 					if err != nil {
+						send(agentActivityMsg{agent: "judge", status: "error", line: err.Error()})
 						send(phaseResultMsg{err: err})
 						return
 					}
 					for _, line := range strings.Split(r2.Output, "\n") {
 						if strings.TrimSpace(line) != "" {
 							send(streamLineMsg{agent: "judge", line: line})
+							send(agentActivityMsg{agent: "judge", line: line})
 						}
 					}
+					send(agentActivityMsg{agent: "judge", status: "done", line: "revision ready"})
 					revised := r2.Output
 					send(approvalMsg{
 						question: "Approve revised plan?",
@@ -133,16 +148,20 @@ func (m *Model) runDivide() {
 		return
 	}
 
+	judgeModel := m.cfg.Agents[m.cfg.Judge.Agent].Model
 	send(streamLineMsg{agent: "judge", line: "breaking plan into tasks..."})
+	send(agentActivityMsg{agent: "judge", model: judgeModel, status: "running", line: "breaking plan into tasks..."})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	result, err := judge.Run(ctx, buildDividePrompt(m.project, m.cfg))
 	if err != nil {
+		send(agentActivityMsg{agent: "judge", status: "error", line: err.Error()})
 		send(phaseResultMsg{err: err})
 		return
 	}
+	send(agentActivityMsg{agent: "judge", status: "done", line: "tasks generated"})
 
 	tasks, err := parseTasks(result.Output)
 	if err != nil {
@@ -179,7 +198,7 @@ func (m *Model) runDivide() {
 	manifest := &state.TaskManifest{Tasks: tasks}
 
 	send(approvalMsg{
-		question: "Approve task assignments?",
+		question: fmt.Sprintf("Approve %d task assignments?", len(tasks)),
 		onYes: func() {
 			_ = state.SaveManifest(m.arosDir, manifest)
 			m.project.Phase = state.PhaseDivide
@@ -261,7 +280,18 @@ func (m *Model) execTask(task *state.Task, byID map[string]*state.Task, manifest
 		}
 	}
 
+	agentModel := ""
+	if ac, ok := m.cfg.Agents[task.AssignedTo]; ok {
+		agentModel = ac.Model
+	}
+
 	send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ► %s", task.ID, task.Title)})
+	send(agentActivityMsg{
+		agent:  task.AssignedTo,
+		model:  agentModel,
+		status: "running",
+		line:   fmt.Sprintf("[%s] %s", task.ID, task.Title),
+	})
 
 	depOutputs := collectDepOutputs(task, byID)
 	memCtx := m.mem.Ask(context.Background(), task.Title)
@@ -272,6 +302,7 @@ func (m *Model) execTask(task *state.Task, byID map[string]*state.Task, manifest
 	result, err := a.Run(ctx, buildWorkPrompt(task, depOutputs, memCtx))
 	if err != nil {
 		send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✗ error: %v", task.ID, err)})
+		send(agentActivityMsg{agent: task.AssignedTo, status: "error", line: err.Error()})
 		task.Status = state.TaskBlocked
 		task.BlockReason = err.Error()
 		_ = state.SaveManifest(m.arosDir, manifest)
@@ -281,6 +312,7 @@ func (m *Model) execTask(task *state.Task, byID map[string]*state.Task, manifest
 	for _, line := range strings.Split(result.Output, "\n") {
 		if strings.TrimSpace(line) != "" {
 			send(streamLineMsg{agent: task.AssignedTo, line: line})
+			send(agentActivityMsg{agent: task.AssignedTo, line: line})
 		}
 	}
 
@@ -289,4 +321,5 @@ func (m *Model) execTask(task *state.Task, byID map[string]*state.Task, manifest
 	_ = state.SaveManifest(m.arosDir, manifest)
 	_ = m.mem.Ingest(context.Background(), fmt.Sprintf("Task %s (%s):\n%s", task.ID, task.Title, result.Output))
 	send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✓ done", task.ID)})
+	send(agentActivityMsg{agent: task.AssignedTo, status: "done", line: fmt.Sprintf("[%s] done", task.ID)})
 }
