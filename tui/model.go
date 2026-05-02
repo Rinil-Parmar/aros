@@ -162,8 +162,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 6
-		m.input.Width = msg.Width - 6
+		m.viewport.Height = msg.Height - 5
+		m.input.Width = msg.Width - 8
 		m.refreshViewport()
 
 	case spinner.TickMsg:
@@ -463,34 +463,77 @@ func (m *Model) View() string {
 		return "Goodbye.\n"
 	}
 
-	var sb strings.Builder
-
-	phaseLabel := " AROS CLI "
-	if m.project != nil {
-		phaseLabel = fmt.Sprintf(" AROS CLI  ·  %s  ·  %s ", m.project.ProjectName, strings.ToUpper(string(m.project.Phase)))
-	}
 	w := m.width
 	if w < 20 {
 		w = 80
 	}
-	sb.WriteString(stylePhaseBar.Width(w).Render(phaseLabel) + "\n")
-	sb.WriteString(m.viewport.View() + "\n")
-	sb.WriteString(styleDivider.Render(strings.Repeat("─", w)) + "\n")
 
+	// Top phase bar
+	phaseLabel := " AROS CLI "
+	if m.project != nil {
+		phaseLabel = fmt.Sprintf(" ◆ AROS  ·  %s  ·  %s ", m.project.ProjectName, strings.ToUpper(string(m.project.Phase)))
+	}
+	topBar := stylePhaseBar.Width(w).Render(phaseLabel)
+
+	// Divider
+	divider := styleDivider.Render(strings.Repeat("─", w))
+
+	// Input prefix
 	prefix := styleInputPrefix.Render("❯")
 	if m.busy {
 		prefix = m.spinner.View()
 	}
 	hint := ""
 	if m.prompt != "" && m.prompt != "y/n" {
-		hint = styleSystemMsg.Render("(" + m.prompt + ") ")
+		hint = styleSystemMsg.Render("(" + m.prompt + ")  ")
 	}
 	if m.mode == modeApproval {
-		hint = styleSystemMsg.Render("(y/n) ")
+		hint = styleSystemMsg.Render("(y/n)  ")
 	}
-	sb.WriteString(fmt.Sprintf(" %s %s%s", prefix, hint, m.input.View()))
+	inputRow := fmt.Sprintf(" %s  %s%s", prefix, hint, m.input.View())
 
-	return sb.String()
+	// Bottom status bar
+	statusBar := m.renderStatusBar(w)
+
+	return topBar + "\n" + m.viewport.View() + "\n" + divider + "\n" + inputRow + "\n" + statusBar
+}
+
+func (m *Model) renderStatusBar(w int) string {
+	if m.cfg == nil {
+		return styleStatusBar.Width(w).Render("loading...")
+	}
+
+	var parts []string
+	judge := styleStatusKey.Render("judge") + " " + m.cfg.Judge.Agent
+
+	agentNames := make([]string, 0, len(m.cfg.Agents))
+	for name := range m.cfg.Agents {
+		agentNames = append(agentNames, name)
+	}
+	// stable sort
+	for i := 0; i < len(agentNames)-1; i++ {
+		for j := i + 1; j < len(agentNames); j++ {
+			if agentNames[i] > agentNames[j] {
+				agentNames[i], agentNames[j] = agentNames[j], agentNames[i]
+			}
+		}
+	}
+
+	for _, name := range agentNames {
+		ac := m.cfg.Agents[name]
+		if !ac.Enabled {
+			continue
+		}
+		label := styleStatusKey.Render(name) + " " + ac.Model
+		parts = append(parts, label)
+	}
+
+	sep := styleStatusSep.String()
+	content := judge + sep + strings.Join(parts, sep)
+	if len(parts) == 0 {
+		content = judge
+	}
+	return styleStatusBar.Width(w).Render(content)
 }
 
 func (m *Model) addSystem(text string) {

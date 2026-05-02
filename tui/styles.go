@@ -66,6 +66,21 @@ var (
 
 	styleTaskPending = lipgloss.NewStyle().
 				Foreground(colorSystem)
+
+	styleStatusBar = lipgloss.NewStyle().
+			Background(lipgloss.Color("#1F2937")).
+			Foreground(lipgloss.Color("#9CA3AF")).
+			Padding(0, 2)
+
+	styleStatusKey = lipgloss.NewStyle().
+			Background(lipgloss.Color("#1F2937")).
+			Foreground(colorPrimary).
+			Bold(true)
+
+	styleStatusSep = lipgloss.NewStyle().
+			Background(lipgloss.Color("#1F2937")).
+			Foreground(lipgloss.Color("#374151")).
+			SetString("  │  ")
 )
 
 func agentColor(name string) lipgloss.Color {
