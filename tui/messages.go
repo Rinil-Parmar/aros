@@ -52,3 +52,12 @@ type freeInputMsg struct {
 	prompt   string
 	callback func(text string)
 }
+
+// agentActivityMsg updates the live activity panel for a single agent.
+// status: "running" | "done" | "error" | "clear" (clear resets all activity)
+type agentActivityMsg struct {
+	agent  string
+	model  string // empty = keep existing model
+	status string
+	line   string // latest output line
+}

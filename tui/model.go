@@ -26,6 +26,13 @@ const (
 	modeApproval
 )
 
+// agentStatus tracks live state for one agent in the activity panel.
+type agentStatus struct {
+	model  string
+	status string // "running" | "done" | "error"
+	line   string // latest output line (already truncated)
+}
+
 type Model struct {
 	width, height int
 
@@ -48,6 +55,9 @@ type Model struct {
 	arosDir string
 	cwd     string
 	busy    bool
+
+	activity         map[string]*agentStatus
+	approvalQuestion string
 
 	quitting bool
 }
@@ -192,9 +202,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 5
 		m.input.Width = msg.Width - 8
+		m.recalcLayout()
 		m.refreshViewport()
 
 	case spinner.TickMsg:
@@ -221,13 +230,45 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case approvalMsg:
 		m.onYes = msg.onYes
 		m.onNo = msg.onNo
-		m.addSystem(msg.question + "  [y/n]")
+		m.approvalQuestion = msg.question
 		m.setMode(modeApproval, "y/n")
+		m.recalcLayout()
 
 	case freeInputMsg:
 		m.onFreeText = msg.callback
 		m.addSystem(msg.prompt)
 		m.setMode(modeText, msg.prompt)
+
+	case agentActivityMsg:
+		if m.activity == nil {
+			m.activity = make(map[string]*agentStatus)
+		}
+		if msg.status == "clear" {
+			m.activity = make(map[string]*agentStatus)
+			m.recalcLayout()
+			break
+		}
+		prev, exists := m.activity[msg.agent]
+		if !exists {
+			prev = &agentStatus{}
+			m.activity[msg.agent] = prev
+		}
+		if msg.model != "" {
+			prev.model = msg.model
+		}
+		if msg.status != "" {
+			prev.status = msg.status
+		}
+		if msg.line != "" {
+			line := msg.line
+			if len(line) > 50 {
+				line = line[:47] + "..."
+			}
+			prev.line = line
+		}
+		if !exists {
+			m.recalcLayout()
+		}
 	}
 
 	// Pass to input for typing
@@ -243,7 +284,9 @@ func (m *Model) handleInput(text string) tea.Cmd {
 
 	switch m.mode {
 	case modeApproval:
+		m.approvalQuestion = ""
 		m.setMode(modeIdle, "")
+		m.recalcLayout()
 		lower := strings.ToLower(text)
 		if lower == "y" || lower == "yes" {
 			cb := m.onYes
@@ -402,10 +445,13 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) tea.Cmd {
 		m.showHelp()
 	case "plan_done":
 		m.addSuccess("Plan approved! Type 'divide' to assign tasks.")
+		send(agentActivityMsg{status: "clear"})
 	case "divide_done":
 		m.addSuccess("Tasks assigned! Type 'work' to start execution.")
+		send(agentActivityMsg{status: "clear"})
 	case "work_done":
 		m.addSuccess("All tasks complete!")
+		send(agentActivityMsg{status: "clear"})
 	}
 	m.setMode(modeText, "")
 	return nil
@@ -510,83 +556,6 @@ func (m *Model) showStatus() {
 	}
 }
 
-func (m *Model) View() string {
-	if m.quitting {
-		return "Goodbye.\n"
-	}
-
-	w := m.width
-	if w < 20 {
-		w = 80
-	}
-
-	// Top phase bar
-	phaseLabel := " AROS CLI "
-	if m.project != nil {
-		phaseLabel = fmt.Sprintf(" ◆ AROS  ·  %s  ·  %s ", m.project.ProjectName, strings.ToUpper(string(m.project.Phase)))
-	}
-	topBar := stylePhaseBar.Width(w).Render(phaseLabel)
-
-	// Divider
-	divider := styleDivider.Render(strings.Repeat("─", w))
-
-	// Input prefix
-	prefix := styleInputPrefix.Render("❯")
-	if m.busy {
-		prefix = m.spinner.View()
-	}
-	hint := ""
-	if m.prompt != "" && m.prompt != "y/n" {
-		hint = styleSystemMsg.Render("(" + m.prompt + ")  ")
-	}
-	if m.mode == modeApproval {
-		hint = styleSystemMsg.Render("(y/n)  ")
-	}
-	inputRow := fmt.Sprintf(" %s  %s%s", prefix, hint, m.input.View())
-
-	// Bottom status bar
-	statusBar := m.renderStatusBar(w)
-
-	return topBar + "\n" + m.viewport.View() + "\n" + divider + "\n" + inputRow + "\n" + statusBar
-}
-
-func (m *Model) renderStatusBar(w int) string {
-	if m.cfg == nil {
-		return styleStatusBar.Width(w).Render("loading...")
-	}
-
-	var parts []string
-	judge := lipgloss.NewStyle().Background(colorSurface).Foreground(colorBrand).Bold(true).Render("judge") + " " + m.cfg.Judge.Agent
-
-	agentNames := make([]string, 0, len(m.cfg.Agents))
-	for name := range m.cfg.Agents {
-		agentNames = append(agentNames, name)
-	}
-	// stable sort
-	for i := 0; i < len(agentNames)-1; i++ {
-		for j := i + 1; j < len(agentNames); j++ {
-			if agentNames[i] > agentNames[j] {
-				agentNames[i], agentNames[j] = agentNames[j], agentNames[i]
-			}
-		}
-	}
-
-	for _, name := range agentNames {
-		ac := m.cfg.Agents[name]
-		if !ac.Enabled {
-			continue
-		}
-		label := lipgloss.NewStyle().Background(colorSurface).Foreground(colorBrand).Bold(true).Render(name) + " " + ac.Model
-		parts = append(parts, label)
-	}
-
-	sep := styleStatusSep.String()
-	content := judge + sep + strings.Join(parts, sep)
-	if len(parts) == 0 {
-		content = judge
-	}
-	return styleStatusBar.Width(w).Render(content)
-}
 
 func (m *Model) addSystem(text string) {
 	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: styleSystemMsg.Render(text)})
