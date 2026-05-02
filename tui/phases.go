@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Rinil-Parmar/aros/state"
@@ -235,12 +236,14 @@ func (m *Model) runWork() {
 	}
 	send(streamLineMsg{agent: "aros", line: fmt.Sprintf("Starting %d tasks (max %d concurrent)...", len(manifest.Tasks), maxConcurrent)})
 
+	var mu sync.Mutex
 	dispatched := make(map[string]bool)
 	sem := make(chan struct{}, maxConcurrent)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
+		mu.Lock()
 		allDone := true
 		for _, t := range byID {
 			if t.Status != state.TaskDone {
@@ -248,24 +251,26 @@ func (m *Model) runWork() {
 				break
 			}
 		}
+		if !allDone {
+			for _, t := range byID {
+				if dispatched[t.ID] || t.Status == state.TaskDone {
+					continue
+				}
+				if depsComplete(t, byID) {
+					dispatched[t.ID] = true
+					t.Status = state.TaskInProgress
+					_ = state.SaveManifest(m.arosDir, manifest)
+					sem <- struct{}{}
+					go func(task *state.Task) {
+						defer func() { <-sem }()
+						m.execTask(task, &mu, byID, manifest)
+					}(t)
+				}
+			}
+		}
+		mu.Unlock()
 		if allDone {
 			break
-		}
-
-		for _, t := range byID {
-			if dispatched[t.ID] || t.Status == state.TaskDone {
-				continue
-			}
-			if depsComplete(t, byID) {
-				dispatched[t.ID] = true
-				t.Status = state.TaskInProgress
-				_ = state.SaveManifest(m.arosDir, manifest)
-				sem <- struct{}{}
-				go func(task *state.Task) {
-					defer func() { <-sem }()
-					m.execTask(task, byID, manifest)
-				}(t)
-			}
 		}
 		<-ticker.C
 	}
@@ -275,7 +280,7 @@ func (m *Model) runWork() {
 	send(phaseResultMsg{phase: "work_done"})
 }
 
-func (m *Model) execTask(task *state.Task, byID map[string]*state.Task, manifest *state.TaskManifest) {
+func (m *Model) execTask(task *state.Task, mu *sync.Mutex, byID map[string]*state.Task, manifest *state.TaskManifest) {
 	a, ok := m.reg[task.AssignedTo]
 	if !ok {
 		for _, av := range m.reg {
@@ -297,7 +302,10 @@ func (m *Model) execTask(task *state.Task, byID map[string]*state.Task, manifest
 		line:   fmt.Sprintf("[%s] %s", task.ID, task.Title),
 	})
 
+	mu.Lock()
 	depOutputs := collectDepOutputs(task, byID)
+	mu.Unlock()
+
 	memCtx := m.mem.Ask(context.Background(), task.Title)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.Work.AgentTimeoutSeconds)*time.Second)
@@ -307,9 +315,11 @@ func (m *Model) execTask(task *state.Task, byID map[string]*state.Task, manifest
 	if err != nil {
 		send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✗ error: %v", task.ID, err)})
 		send(agentActivityMsg{agent: task.AssignedTo, status: "error", line: err.Error()})
+		mu.Lock()
 		task.Status = state.TaskBlocked
 		task.BlockReason = err.Error()
 		_ = state.SaveManifest(m.arosDir, manifest)
+		mu.Unlock()
 		return
 	}
 
@@ -320,9 +330,11 @@ func (m *Model) execTask(task *state.Task, byID map[string]*state.Task, manifest
 		}
 	}
 
+	mu.Lock()
 	task.Status = state.TaskDone
 	task.Output = result.Output
 	_ = state.SaveManifest(m.arosDir, manifest)
+	mu.Unlock()
 	_ = m.mem.Ingest(context.Background(), fmt.Sprintf("Task %s (%s):\n%s", task.ID, task.Title, result.Output))
 	send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✓ done", task.ID)})
 	send(agentActivityMsg{agent: task.AssignedTo, status: "done", line: fmt.Sprintf("[%s] done", task.ID)})

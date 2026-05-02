@@ -179,7 +179,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Scroll keys: route to viewport, NOT input
 		switch key {
-		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
+		case "pgup", "pgdown", "ctrl+u", "home", "end":
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			return m, cmd
@@ -268,6 +268,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recalcLayout()
 
 	case freeInputMsg:
+		m.busy = false // allow Enter so the user can actually submit their response
 		m.onFreeText = msg.callback
 		m.addSystem(msg.prompt)
 		m.setMode(modeText, msg.prompt)

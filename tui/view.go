@@ -352,7 +352,8 @@ func (m *Model) renderInputBox() string {
 		hint = styleSystemMsg.Render("(" + m.prompt + ")  ")
 	}
 	inputContent := fmt.Sprintf(" %s  %s%s", prefix, hint, m.input.View())
-	mid := bc.Render("│") + inputContent + bc.Render("│")
+	// Clamp to inner width so long input never overflows the right border.
+	mid := bc.Render("│") + lipgloss.NewStyle().Width(inner).MaxWidth(inner).Render(inputContent) + bc.Render("│")
 
 	bot := bc.Render("╰" + hBar + "╯")
 
