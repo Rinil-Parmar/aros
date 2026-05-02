@@ -50,6 +50,8 @@ func Run(ctx context.Context, s *state.ProjectState, reg agent.Registry, cfg *co
 			continue
 		}
 
+		assignIDs(tasks)
+
 		if err := detectCycles(tasks); err != nil {
 			fmt.Printf("warning: dependency cycle detected: %v\n", err)
 			if attempt == maxApprovalLoops {
@@ -58,9 +60,6 @@ func Run(ctx context.Context, s *state.ProjectState, reg agent.Registry, cfg *co
 			feedback = fmt.Sprintf("The previous task list had a dependency cycle: %v. Fix the dependencies.", err)
 			continue
 		}
-
-		// Assign stable IDs if missing
-		assignIDs(tasks)
 
 		printTaskTable(tasks)
 
