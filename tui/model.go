@@ -71,6 +71,16 @@ var knownModels = map[string][]string{
 		"google/gemini-pro",
 		"deepseek/deepseek-chat",
 	},
+	"copilot": {
+		"claude-sonnet-4.5",
+		"claude-haiku-4.5",
+		"claude-opus-4.5",
+		"gpt-4o",
+		"gpt-4o-mini",
+		"o3",
+		"o4-mini",
+		"gemini-2.0-flash",
+	},
 }
 
 var program *tea.Program
@@ -332,7 +342,7 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		if len(parts) == 1 {
 			m.addSystem("Usage: /model <agent> <model>")
 			m.addSystem("")
-			for _, agentName := range []string{"claude", "opencode"} {
+			for _, agentName := range []string{"claude", "opencode", "copilot"} {
 				if models, ok := knownModels[agentName]; ok {
 					m.addSystem(fmt.Sprintf("  %s:", agentName))
 					for _, mdl := range models {
