@@ -10,13 +10,16 @@ const (
 	kindSuccess                // phase completion
 	kindError                  // error messages
 	kindStream                 // streaming agent line (appended to last agent msg)
+	kindBanner                 // welcome banner — re-rendered on resize
 )
 
 // ChatMessage is one entry in the conversation log.
+// Body stores raw text (no ANSI); rendered fresh in refreshViewport() with current width.
 type ChatMessage struct {
 	Kind      msgKind
-	AgentName string // set when Kind == kindAgent or kindStream
-	Text      string
+	AgentName string // set when Kind == kindAgent
+	ModelName string // set when Kind == kindAgent (shown in header)
+	Body      string // raw text — no pre-rendered ANSI
 }
 
 // --- bubbletea msg types (internal events) ---
