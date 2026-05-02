@@ -96,7 +96,7 @@ func send(msg tea.Msg) {
 func New() *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
+	sp.Style = lipgloss.NewStyle().Foreground(colorBrand)
 
 	ti := textinput.New()
 	ti.Placeholder = "Type a command (try: /help)"
@@ -422,7 +422,8 @@ func (m *Model) showWelcome() tea.Cmd {
   ██╔══██║██╔══██╗██║   ██║╚════██║    ██║     ██║     ██║
   ██║  ██║██║  ██║╚██████╔╝███████║    ╚██████╗███████╗██║
   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝     ╚═════╝╚══════╝╚═╝`
-	banner := lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(styleBanner.Render(bannerText))
+	bannerStyle := lipgloss.NewStyle().Bold(true).Foreground(colorBrand)
+	banner := lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(bannerStyle.Render(bannerText))
 	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Text: banner})
 	subtitle := lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(
 		styleSystemMsg.Render("Multi-agent AI orchestrator  •  v0.1.0"),
@@ -555,7 +556,7 @@ func (m *Model) renderStatusBar(w int) string {
 	}
 
 	var parts []string
-	judge := styleStatusKey.Render("judge") + " " + m.cfg.Judge.Agent
+	judge := lipgloss.NewStyle().Background(colorSurface).Foreground(colorBrand).Bold(true).Render("judge") + " " + m.cfg.Judge.Agent
 
 	agentNames := make([]string, 0, len(m.cfg.Agents))
 	for name := range m.cfg.Agents {
@@ -575,7 +576,7 @@ func (m *Model) renderStatusBar(w int) string {
 		if !ac.Enabled {
 			continue
 		}
-		label := styleStatusKey.Render(name) + " " + ac.Model
+		label := lipgloss.NewStyle().Background(colorSurface).Foreground(colorBrand).Bold(true).Render(name) + " " + ac.Model
 		parts = append(parts, label)
 	}
 

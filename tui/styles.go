@@ -3,24 +3,35 @@ package tui
 import "github.com/charmbracelet/lipgloss"
 
 var (
-	colorPrimary  = lipgloss.Color("#7C3AED") // purple — Aros brand
-	colorClaude   = lipgloss.Color("#D97706") // amber
-	colorOpencode = lipgloss.Color("#2563EB") // blue
-	colorJudge    = lipgloss.Color("#059669") // green
-	colorSystem   = lipgloss.Color("#6B7280") // gray
-	colorError    = lipgloss.Color("#DC2626") // red
-	colorHuman    = lipgloss.Color("#EC4899") // pink
-	colorSuccess  = lipgloss.Color("#10B981") // emerald
+	// Brand
+	colorBrand    = lipgloss.Color("#7C3AED")
+	colorBrandDim = lipgloss.Color("#5B21B6")
 
-	styleHeader = lipgloss.NewStyle().
+	// Agent identity
+	colorClaude    = lipgloss.Color("#F59E0B") // amber
+	colorOpencode  = lipgloss.Color("#3B82F6") // blue
+	colorCopilot   = lipgloss.Color("#06B6D4") // cyan
+	colorJudge     = lipgloss.Color("#10B981") // emerald
+
+	// Semantic
+	colorSuccess = lipgloss.Color("#22C55E")
+	colorError   = lipgloss.Color("#EF4444")
+	colorWarning = lipgloss.Color("#F59E0B")
+
+	// Neutrals (dark theme)
+	colorSurface = lipgloss.Color("#1E1E2E")
+	colorMuted   = lipgloss.Color("#374151")
+	colorSubtle  = lipgloss.Color("#6B7280")
+	colorText    = lipgloss.Color("#F9FAFB")
+
+	// Header bar
+	stylePhaseBar = lipgloss.NewStyle().
+			Background(colorBrand).
+			Foreground(lipgloss.Color("#FFFFFF")).
 			Bold(true).
-			Foreground(colorPrimary).
-			Padding(0, 1)
+			Padding(0, 2)
 
-	styleBanner = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colorPrimary)
-
+	// Agent labels in chat history
 	styleAgentLabel = func(color lipgloss.Color) lipgloss.Style {
 		return lipgloss.NewStyle().
 			Bold(true).
@@ -28,8 +39,9 @@ var (
 			Width(12)
 	}
 
+	// Chat message types
 	styleSystemMsg = lipgloss.NewStyle().
-			Foreground(colorSystem).
+			Foreground(colorSubtle).
 			Italic(true)
 
 	styleErrorMsg = lipgloss.NewStyle().
@@ -41,46 +53,62 @@ var (
 			Bold(true)
 
 	styleHumanMsg = lipgloss.NewStyle().
-			Foreground(colorHuman).
+			Foreground(lipgloss.Color("#EC4899")).
 			Bold(true)
 
+	// Input
 	styleInputPrefix = lipgloss.NewStyle().
-				Foreground(colorPrimary).
+				Foreground(colorBrand).
 				Bold(true)
 
-	stylePhaseBar = lipgloss.NewStyle().
-			Background(colorPrimary).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Bold(true).
-			Padding(0, 2)
-
-	styleDivider = lipgloss.NewStyle().
-			Foreground(colorSystem)
-
-	styleTaskID = lipgloss.NewStyle().
-			Foreground(colorPrimary).
-			Bold(true)
-
-	styleTaskDone = lipgloss.NewStyle().
-			Foreground(colorSuccess)
-
-	styleTaskPending = lipgloss.NewStyle().
-				Foreground(colorSystem)
-
+	// Status bar (bottom)
 	styleStatusBar = lipgloss.NewStyle().
-			Background(lipgloss.Color("#1F2937")).
-			Foreground(lipgloss.Color("#9CA3AF")).
-			Padding(0, 2)
-
-	styleStatusKey = lipgloss.NewStyle().
-			Background(lipgloss.Color("#1F2937")).
-			Foreground(colorPrimary).
-			Bold(true)
+			Background(colorSurface).
+			Foreground(colorSubtle).
+			Padding(0, 1)
 
 	styleStatusSep = lipgloss.NewStyle().
-			Background(lipgloss.Color("#1F2937")).
-			Foreground(lipgloss.Color("#374151")).
+			Background(colorSurface).
+			Foreground(colorMuted).
 			SetString("  │  ")
+
+	// Activity panel
+	styleActivitySep = lipgloss.NewStyle().
+				Foreground(colorMuted)
+
+	styleActivityAgent = lipgloss.NewStyle().
+				Bold(true)
+
+	styleActivityModel = lipgloss.NewStyle().
+				Foreground(colorSubtle)
+
+	styleActivityLine = lipgloss.NewStyle().
+				Foreground(colorSubtle).
+				Italic(true)
+
+	styleActivityDone = lipgloss.NewStyle().
+				Foreground(colorSuccess).
+				Bold(true)
+
+	styleActivityError = lipgloss.NewStyle().
+				Foreground(colorError).
+				Bold(true)
+
+	// Approval card
+	styleApprovalYes = lipgloss.NewStyle().
+				Foreground(colorSuccess).
+				Bold(true)
+
+	styleApprovalNo = lipgloss.NewStyle().
+			Foreground(colorSubtle)
+
+	// Task table
+	styleTaskDone    = lipgloss.NewStyle().Foreground(colorSuccess)
+	styleTaskPending = lipgloss.NewStyle().Foreground(colorSubtle)
+
+	// Misc
+	styleDivider = lipgloss.NewStyle().Foreground(colorMuted)
+	styleHeader  = lipgloss.NewStyle().Bold(true).Foreground(colorBrand).Padding(0, 1)
 )
 
 func agentColor(name string) lipgloss.Color {
@@ -89,10 +117,12 @@ func agentColor(name string) lipgloss.Color {
 		return colorClaude
 	case "opencode":
 		return colorOpencode
+	case "copilot":
+		return colorCopilot
 	case "judge":
 		return colorJudge
 	default:
-		return colorSystem
+		return colorSubtle
 	}
 }
 
