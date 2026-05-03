@@ -35,13 +35,33 @@ func runWork(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("no Aros project found: %w", err)
 	}
-	if err := state.RequirePhase(s, false, state.PhaseDivide); err != nil {
+	if err := state.RequirePhase(s, false, state.PhaseDivide, state.PhaseWork); err != nil {
 		return err
 	}
 
 	manifest, err := state.LoadManifest(arosDir)
 	if err != nil {
 		return fmt.Errorf("loading manifest: %w", err)
+	}
+	if len(manifest.Tasks) == 0 {
+		return fmt.Errorf("no tasks to execute; run `aros divide` first")
+	}
+	allDone := true
+	for _, t := range manifest.Tasks {
+		if t.Status != state.TaskDone {
+			allDone = false
+			break
+		}
+	}
+	if allDone {
+		s.Phase = state.PhaseDone
+		_ = state.SaveState(arosDir, s)
+		fmt.Printf("All tasks are already complete.\n")
+		return nil
+	}
+	s.Phase = state.PhaseWork
+	if err := state.SaveState(arosDir, s); err != nil {
+		return fmt.Errorf("saving work phase state: %w", err)
 	}
 
 	cfg, err := config.Load(cfgFile)

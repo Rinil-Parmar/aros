@@ -41,17 +41,22 @@ func Run(ctx context.Context, manifest *state.TaskManifest, arosDir string, reg 
 	defer ticker.Stop()
 
 	for {
-		// Check if all done
 		mu.Lock()
-		allDone := true
+		done, blocked, total := 0, 0, len(byID)
 		for _, t := range byID {
-			if t.Status != state.TaskDone {
-				allDone = false
-				break
+			switch t.Status {
+			case state.TaskDone:
+				done++
+			case state.TaskBlocked:
+				blocked++
 			}
 		}
+		finished := done+blocked == total
 		mu.Unlock()
-		if allDone {
+		if finished {
+			if blocked > 0 {
+				fmt.Printf("warning: %d task(s) blocked\n", blocked)
+			}
 			break
 		}
 
