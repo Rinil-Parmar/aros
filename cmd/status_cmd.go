@@ -29,8 +29,12 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("no Aros project found in this directory: %w", err)
 	}
+	active, _ := state.ActiveSession(arosDir)
 
 	fmt.Printf("Project:  %s\n", s.ProjectName)
+	if active != nil {
+		fmt.Printf("Session:  %s (%s)\n", active.Name, active.ID)
+	}
 	fmt.Printf("Phase:    %s\n", s.Phase)
 	if s.Task != "" {
 		fmt.Printf("Task:     %s\n", s.Task)

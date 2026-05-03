@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/Rinil-Parmar/aros/state"
 	"github.com/spf13/cobra"
@@ -31,21 +30,19 @@ func runInit(cmd *cobra.Command, args []string) error {
 	arosDir := filepath.Join(cwd, ".aros")
 
 	if _, err := os.Stat(arosDir); err == nil {
-		return fmt.Errorf(".aros/ already exists in this directory — project already initialized")
+		return fmt.Errorf(".aros/ already exists in this directory — use `aros session new %q`", projectName)
 	}
 
 	if err := os.MkdirAll(arosDir, 0755); err != nil {
 		return fmt.Errorf("creating .aros directory: %w", err)
 	}
 
-	s := &state.ProjectState{
-		ProjectName: projectName,
-		Phase:       state.PhaseInit,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+	meta, _, err := state.CreateSession(arosDir, projectName)
+	if err != nil {
+		return fmt.Errorf("creating session: %w", err)
 	}
-	if err := state.SaveState(arosDir, s); err != nil {
-		return fmt.Errorf("saving state: %w", err)
+	if err := state.SetActiveSession(arosDir, meta.ID); err != nil {
+		return fmt.Errorf("setting active session: %w", err)
 	}
 
 	// Write default project config
