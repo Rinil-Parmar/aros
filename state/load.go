@@ -49,17 +49,29 @@ func SaveManifest(arosDir string, m *TaskManifest) error {
 	return writeJSON(manifestFilePath(arosDir), m)
 }
 
-// writeJSON writes v as JSON to path using a write-then-rename for atomicity.
+// writeJSON writes v as JSON to path using a unique temp file + rename for atomicity.
+// Each call gets its own temp file so concurrent writes to different paths never collide.
 func writeJSON(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling JSON: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".aros-write-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpName := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmpName)
 		return fmt.Errorf("writing temp file: %w", err)
 	}
-	return os.Rename(tmp, path)
+	if err := f.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+	return os.Rename(tmpName, path)
 }
 
 // ArosDir returns the .aros directory for cwd.
