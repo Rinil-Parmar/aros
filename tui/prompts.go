@@ -102,3 +102,33 @@ func buildWorkPrompt(task *state.Task, basePrompt, depOutputs, memCtx string) st
 	sb.WriteString("\n\nComplete this task fully. If you need a human decision, output '<<AROS_HUMAN>>' on its own line followed by your question, then stop.")
 	return sb.String()
 }
+
+func buildChatPrompt(question string, project *state.ProjectState, manifest *state.TaskManifest, memCtx string) string {
+	var sb strings.Builder
+	sb.WriteString("You are the Aros judge agent. Answer the user's question using project context below.\n")
+	sb.WriteString("Be concise and actionable. If clarification is needed, ask one focused question.\n")
+	if project != nil {
+		sb.WriteString(fmt.Sprintf("\nPROJECT: %s  (phase: %s)\n", project.ProjectName, project.Phase))
+		if project.Task != "" {
+			sb.WriteString("TASK: " + project.Task + "\n")
+		}
+		if project.ApprovedPlan != "" {
+			sb.WriteString("\nAPPROVED PLAN:\n" + project.ApprovedPlan + "\n")
+		}
+	}
+	if manifest != nil && len(manifest.Tasks) > 0 {
+		sb.WriteString("\nTASKS:\n")
+		for _, t := range manifest.Tasks {
+			line := fmt.Sprintf("  [%s] %s  agent:%s  status:%s", t.ID, t.Title, t.AssignedTo, t.Status)
+			if t.BlockReason != "" {
+				line += "  block:" + t.BlockReason
+			}
+			sb.WriteString(line + "\n")
+		}
+	}
+	if memCtx != "" {
+		sb.WriteString("\nMEMORY:\n" + memCtx + "\n")
+	}
+	sb.WriteString("\nQUESTION: " + question + "\n")
+	return sb.String()
+}

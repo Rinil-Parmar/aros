@@ -106,6 +106,7 @@ Launch `aros` with no arguments to open the interactive TUI.
 | `/session <new|list|use|rm>` | Manage sessions |
 | `/phase <phase>` | Set phase (init|plan|divide|work|done) |
 | `help` | Show all commands |
+| _Any other text_ | Chat with the judge agent |
 
 ---
 

@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Rinil-Parmar/aros/agent"
 	"github.com/Rinil-Parmar/aros/config"
@@ -59,6 +61,7 @@ type Model struct {
 	approvalQuestion string
 	sessionID        string
 	sessionName      string
+	chatInProgress   bool // true while judge chat goroutine is running
 
 	// layout cache — computed by recalcLayout, used by view.go
 	leftW  int
@@ -243,10 +246,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Enter submits; Shift+Enter / Alt+Enter handled by textarea (newline)
 		if msg.Type == tea.KeyEnter && !msg.Alt {
-			// While busy, block regular commands but keep interactive prompts usable.
-			if m.busy && m.mode != modeApproval && m.onFreeText == nil {
-				return m, nil
-			}
 			text := strings.TrimSpace(m.textarea.Value())
 			m.textarea.Reset()
 			if text != "" {
@@ -308,6 +307,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addSystem(msg.prompt)
 		m.setMode(modeText, msg.prompt)
 
+	case chatDoneMsg:
+		m.chatInProgress = false
+		if msg.err != nil {
+			m.addError(msg.err.Error())
+		}
+
 	case agentActivityMsg:
 		if m.activity == nil {
 			m.activity = make(map[string]*agentStatus)
@@ -354,24 +359,29 @@ func (m *Model) handleInput(text string) tea.Cmd {
 
 	switch m.mode {
 	case modeApproval:
-		cbYes := m.onYes
-		cbNo := m.onNo
-		m.approvalQuestion = ""
-		m.onYes = nil
-		m.onNo = nil
-		// Unlock input immediately — never hold the UI hostage waiting for a goroutine
-		m.busy = false
-		m.setMode(modeText, "")
-		m.recalcLayout()
-		if strings.ToLower(text) == "y" || strings.ToLower(text) == "yes" {
-			if cbYes != nil {
-				go cbYes()
+		lower := strings.ToLower(text)
+		if lower == "y" || lower == "yes" || lower == "n" || lower == "no" {
+			cbYes := m.onYes
+			cbNo := m.onNo
+			m.approvalQuestion = ""
+			m.onYes = nil
+			m.onNo = nil
+			// Unlock input immediately — never hold the UI hostage waiting for a goroutine
+			m.busy = false
+			m.setMode(modeText, "")
+			m.recalcLayout()
+			if lower == "y" || lower == "yes" {
+				if cbYes != nil {
+					go cbYes()
+				}
+			} else {
+				if cbNo != nil {
+					go cbNo()
+				}
 			}
-		} else {
-			if cbNo != nil {
-				go cbNo()
-			}
+			return nil
 		}
+		m.startChat(text)
 		return nil
 
 	case modeText, modeIdle:
@@ -398,6 +408,10 @@ func (m *Model) dispatch(text string) tea.Cmd {
 	}
 
 	lower := strings.ToLower(text)
+	if m.busy {
+		m.addSystem("Phase is running — wait for it to finish, or use /phase --force to abort.")
+		return nil
+	}
 	switch {
 	case lower == "help":
 		m.showHelp()
@@ -423,7 +437,7 @@ func (m *Model) dispatch(text string) tea.Cmd {
 			go m.runPlan(task)
 		}
 	default:
-		m.addSystem("Unknown command. Type help for commands.")
+		m.startChat(text)
 	}
 	return nil
 }
@@ -715,6 +729,8 @@ func (m *Model) showHelp() {
 		"Phase shortcut: Shift+Tab (cycle init → plan → divide → work → done)",
 		"Scrolling: pgup/pgdn  •  shift+up/down  •  mouse wheel",
 		"Multi-line input: Shift+Enter",
+		"",
+		"Any other text chats with the judge agent.",
 	} {
 		m.addSystem(l)
 	}
@@ -787,6 +803,63 @@ func (m *Model) showSessions() {
 		}
 		m.addSystem(fmt.Sprintf("  %s %s  %s", prefix, s.ID, s.Name))
 	}
+}
+
+func (m *Model) startChat(text string) {
+	if m.chatInProgress {
+		m.addSystem("Judge is thinking — please wait.")
+		return
+	}
+
+	judge, err := m.reg.Judge(m.cfg.Judge.Agent)
+	judgeName := m.cfg.Judge.Agent
+	if err != nil {
+		// fall back to any available agent
+		for name, a := range m.reg {
+			judge = a
+			judgeName = name
+			break
+		}
+		if judge == nil {
+			m.addError("no agent available for chat")
+			return
+		}
+	}
+
+	judgeCfg := m.cfg.Agents[judgeName]
+	m.chatInProgress = true
+	send(agentActivityMsg{agent: judgeName, model: judgeCfg.Model, status: "running", line: "thinking..."})
+
+	question := text
+	project := m.project // capture snapshot for goroutine
+	arosDir := m.arosDir
+
+	go func() {
+		memCtx := m.mem.Ask(context.Background(), question)
+		var manifest *state.TaskManifest
+		if project != nil {
+			if mft, err := state.LoadManifest(arosDir); err == nil {
+				manifest = mft
+			}
+		}
+		prompt := withDense(buildChatPrompt(question, project, manifest, memCtx), judgeCfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		result, err := judge.Run(ctx, prompt)
+		if err != nil {
+			send(agentActivityMsg{agent: judgeName, status: "error", line: err.Error()})
+			send(chatDoneMsg{err: fmt.Errorf("chat error: %w", err)})
+			return
+		}
+		for _, line := range strings.Split(result.Output, "\n") {
+			if strings.TrimSpace(line) != "" {
+				send(streamLineMsg{agent: judgeName, line: line})
+				send(agentActivityMsg{agent: judgeName, line: line})
+			}
+		}
+		send(agentActivityMsg{agent: judgeName, status: "done", line: "done"})
+		send(chatDoneMsg{})
+	}()
 }
 
 func (m *Model) createSession(name string) error {

@@ -50,6 +50,9 @@ type freeInputMsg struct {
 	callback func(text string)
 }
 
+// chatDoneMsg signals that a judge chat goroutine finished.
+type chatDoneMsg struct{ err error }
+
 // agentActivityMsg updates the live activity panel for a single agent.
 // status: "running" | "done" | "error" | "clear" (clear resets all activity)
 type agentActivityMsg struct {
