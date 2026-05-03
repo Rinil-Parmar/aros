@@ -44,12 +44,13 @@ func (m *Model) runPlan(task string) {
 	for i, a := range agents {
 		i, a := i, a
 		g.Go(func() error {
-			agentModel := m.cfg.Agents[a.Name()].Model
-			send(agentActivityMsg{agent: a.Name(), model: agentModel, status: "running", line: "thinking..."})
+			agentCfg := m.cfg.Agents[a.Name()]
+			send(agentActivityMsg{agent: a.Name(), model: agentCfg.Model, status: "running", line: "thinking..."})
 
 			tctx, cancel := context.WithTimeout(gctx, time.Duration(m.cfg.Work.AgentTimeoutSeconds)*time.Second)
 			defer cancel()
-			r, err := a.Run(tctx, buildPlanPrompt(task, memCtx))
+			prompt := withDense(buildPlanPrompt(task, memCtx), agentCfg)
+			r, err := a.Run(tctx, prompt)
 			if err != nil {
 				send(streamLineMsg{agent: a.Name(), line: "error: " + err.Error()})
 				send(agentActivityMsg{agent: a.Name(), status: "error", line: err.Error()})
@@ -69,11 +70,11 @@ func (m *Model) runPlan(task string) {
 	}
 	_ = g.Wait()
 
-	judgeModel := m.cfg.Agents[m.cfg.Judge.Agent].Model
+	judgeCfg := m.cfg.Agents[m.cfg.Judge.Agent]
 	send(streamLineMsg{agent: "judge", line: "synthesizing plans..."})
-	send(agentActivityMsg{agent: "judge", model: judgeModel, status: "running", line: "synthesizing plans..."})
+	send(agentActivityMsg{agent: "judge", model: judgeCfg.Model, status: "running", line: "synthesizing plans..."})
 
-	judgePrompt := buildJudgePlanPrompt(task, plans, "")
+	judgePrompt := withDense(buildJudgePlanPrompt(task, plans, ""), judgeCfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -109,8 +110,8 @@ func (m *Model) runPlan(task string) {
 				prompt: "What should change? (feedback for the judge)",
 				callback: func(feedback string) {
 					// m.busy is set true in handleInput before this goroutine starts
-					send(agentActivityMsg{agent: "judge", model: judgeModel, status: "running", line: "revising plan..."})
-					retryPrompt := buildJudgePlanPrompt(task, plans, feedback)
+					send(agentActivityMsg{agent: "judge", model: judgeCfg.Model, status: "running", line: "revising plan..."})
+					retryPrompt := withDense(buildJudgePlanPrompt(task, plans, feedback), judgeCfg)
 					ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Minute)
 					defer cancel2()
 					r2, err := judge.Run(ctx2, retryPrompt)
@@ -160,14 +161,15 @@ func (m *Model) runDivide() {
 		return
 	}
 
-	judgeModel := m.cfg.Agents[m.cfg.Judge.Agent].Model
+	judgeCfg := m.cfg.Agents[m.cfg.Judge.Agent]
 	send(streamLineMsg{agent: "judge", line: "breaking plan into tasks..."})
-	send(agentActivityMsg{agent: "judge", model: judgeModel, status: "running", line: "breaking plan into tasks..."})
+	send(agentActivityMsg{agent: "judge", model: judgeCfg.Model, status: "running", line: "breaking plan into tasks..."})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	result, err := judge.Run(ctx, buildDividePrompt(m.project, m.cfg))
+	dividePrompt := withDense(buildDividePrompt(m.project, m.cfg), judgeCfg)
+	result, err := judge.Run(ctx, dividePrompt)
 	if err != nil {
 		send(agentActivityMsg{agent: "judge", status: "error", line: err.Error()})
 		send(phaseResultMsg{err: err})
@@ -178,8 +180,9 @@ func (m *Model) runDivide() {
 	tasks, parseErr := parseTasks(result.Output)
 	if parseErr != nil {
 		send(streamLineMsg{agent: "judge", line: "parse failed, retrying with stricter prompt..."})
-		retryPrompt := buildDividePrompt(m.project, m.cfg) +
+		divideRetryPrompt := buildDividePrompt(m.project, m.cfg) +
 			"\n\nPrevious response could not be parsed as JSON. Return ONLY the JSON array — no markdown, no prose, no fences."
+		retryPrompt := withDense(divideRetryPrompt, judgeCfg)
 		retryResult, err2 := judge.Run(ctx, retryPrompt)
 		if err2 != nil {
 			send(phaseResultMsg{err: fmt.Errorf("judge retry failed: %w", err2)})
@@ -322,15 +325,11 @@ func (m *Model) execTask(task *state.Task, mu *sync.Mutex, byID map[string]*stat
 		}
 	}
 
-	agentModel := ""
-	if ac, ok := m.cfg.Agents[task.AssignedTo]; ok {
-		agentModel = ac.Model
-	}
-
+	agentCfg := m.cfg.Agents[task.AssignedTo]
 	send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ► %s", task.ID, task.Title)})
 	send(agentActivityMsg{
 		agent:  task.AssignedTo,
-		model:  agentModel,
+		model:  agentCfg.Model,
 		status: "running",
 		line:   fmt.Sprintf("[%s] %s", task.ID, task.Title),
 	})
@@ -344,7 +343,8 @@ func (m *Model) execTask(task *state.Task, mu *sync.Mutex, byID map[string]*stat
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.Work.AgentTimeoutSeconds)*time.Second)
 	defer cancel()
 
-	result, err := a.Run(ctx, buildWorkPrompt(task, depOutputs, memCtx))
+	workPrompt := withDense(buildWorkPrompt(task, depOutputs, memCtx), agentCfg)
+	result, err := a.Run(ctx, workPrompt)
 	if err != nil {
 		send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✗ error: %v", task.ID, err)})
 		send(agentActivityMsg{agent: task.AssignedTo, status: "error", line: err.Error()})

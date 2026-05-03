@@ -23,6 +23,7 @@ type AgentConfig struct {
 	Enabled   bool     `mapstructure:"enabled"`
 	Model     string   `mapstructure:"model"`
 	Strengths []string `mapstructure:"strengths"`
+	Dense     string   `mapstructure:"dense"` // "" (off), "lite", "full", "ultra"
 	// DangerouslySkipPerms is only used in the work phase
 	DangerouslySkipPerms bool `mapstructure:"dangerously_skip_perms"`
 }
@@ -93,15 +94,18 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agents.claude.enabled", true)
 	v.SetDefault("agents.claude.model", "haiku")
 	v.SetDefault("agents.claude.strengths", []string{"architecture", "reasoning", "docs", "planning"})
+	v.SetDefault("agents.claude.dense", "full")
 	v.SetDefault("agents.claude.dangerously_skip_perms", false)
 
 	v.SetDefault("agents.opencode.enabled", true)
 	v.SetDefault("agents.opencode.model", "openai/gpt-4o-mini")
 	v.SetDefault("agents.opencode.strengths", []string{"implementation", "debugging", "testing"})
+	v.SetDefault("agents.opencode.dense", "full")
 
 	v.SetDefault("agents.copilot.enabled", true)
 	v.SetDefault("agents.copilot.model", "gpt-4.1")
 	v.SetDefault("agents.copilot.strengths", []string{"implementation", "debugging", "refactoring"})
+	v.SetDefault("agents.copilot.dense", "full")
 
 	v.SetDefault("secondmem.enabled", true)
 	v.SetDefault("secondmem.binary", "secondmem")

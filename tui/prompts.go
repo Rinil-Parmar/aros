@@ -8,6 +8,28 @@ import (
 	"github.com/Rinil-Parmar/aros/state"
 )
 
+// denseInstructions returns the dense-mode preamble for the given intensity level.
+func denseInstructions(level string) string {
+	switch level {
+	case "lite":
+		return "**Dense output: drop filler & hedging. Keep articles. Full sentences.**\n\n"
+	case "full":
+		return "**Dense output: drop articles (the/a), allow fragments, short synonyms. No filler (basically/actually/simply).**\n\n"
+	case "ultra":
+		return "**Dense output: abbreviate (DB/auth/cfg), drop conjunctions, use → for causality. No prose filler.**\n\n"
+	default:
+		return "" // empty = normal mode
+	}
+}
+
+// withDense prepends dense instructions to a prompt if the agent config specifies it.
+func withDense(prompt string, ac config.AgentConfig) string {
+	if ac.Dense == "" {
+		return prompt
+	}
+	return denseInstructions(ac.Dense) + prompt
+}
+
 func buildPlanPrompt(task, memCtx string) string {
 	var sb strings.Builder
 	sb.WriteString("You are a software architect. Plan the implementation of:\n\nTASK: ")
