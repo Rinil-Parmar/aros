@@ -19,7 +19,7 @@ const maxApprovalLoops = 3
 // 3. Human approves or requests changes (up to maxApprovalLoops).
 // Returns the approved plan text.
 func Run(ctx context.Context, task string, reg agent.Registry, judgeName string, mem *memory.SecondMem) (string, error) {
-	agents := reg.Enabled()
+	agents := reg.Enabled(judgeName)
 	if len(agents) == 0 {
 		return "", fmt.Errorf("no agents available for planning")
 	}

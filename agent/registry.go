@@ -57,11 +57,17 @@ func (r Registry) Judge(judgeName string) (Agent, error) {
 	return nil, fmt.Errorf("judge agent %q not found in registry — check judge.agent in config", judgeName)
 }
 
-// Enabled returns all agents in the registry except the judge (for parallel plan calls).
-func (r Registry) Enabled() []Agent {
+// Enabled returns all agents except the named judge (for parallel plan calls).
+func (r Registry) Enabled(judgeName ...string) []Agent {
+	exclude := ""
+	if len(judgeName) > 0 {
+		exclude = judgeName[0]
+	}
 	agents := make([]Agent, 0, len(r))
-	for _, a := range r {
-		agents = append(agents, a)
+	for name, a := range r {
+		if name != exclude {
+			agents = append(agents, a)
+		}
 	}
 	return agents
 }
