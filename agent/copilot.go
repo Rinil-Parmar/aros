@@ -20,7 +20,7 @@ func NewCopilotAdapter(model, workDir string) (*CopilotAdapter, error) {
 		return nil, ErrAgentNotAvailable
 	}
 	if model == "" {
-		model = "claude-sonnet-4.5"
+		model = "gpt-4.1"
 	}
 	return &CopilotAdapter{Model: model, WorkDir: workDir}, nil
 }

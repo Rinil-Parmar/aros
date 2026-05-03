@@ -78,5 +78,5 @@ func parseOpenCodeEvents(raw string) string {
 			parts = append(parts, ev.Text)
 		}
 	}
-	return strings.TrimSpace(strings.Join(parts, ""))
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }

@@ -100,7 +100,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agents.opencode.strengths", []string{"implementation", "debugging", "testing"})
 
 	v.SetDefault("agents.copilot.enabled", true)
-	v.SetDefault("agents.copilot.model", "claude-sonnet-4.5")
+	v.SetDefault("agents.copilot.model", "gpt-4.1")
 	v.SetDefault("agents.copilot.strengths", []string{"implementation", "debugging", "refactoring"})
 
 	v.SetDefault("secondmem.enabled", true)
