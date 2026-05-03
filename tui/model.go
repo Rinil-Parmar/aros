@@ -21,7 +21,7 @@ import (
 type inputMode int
 
 const (
-	modeIdle     inputMode = iota
+	modeIdle inputMode = iota
 	modeText
 	modeApproval
 )
@@ -87,9 +87,8 @@ var knownModels = map[string][]string{
 		"deepseek/deepseek-chat",
 	},
 	"copilot": {
-		"claude-sonnet-4.5",
-		"claude-haiku-4.5",
-		"claude-opus-4.5",
+		"gpt-4.1",
+		"gpt-4.1-mini",
 		"gpt-4o",
 		"gpt-4o-mini",
 		"o3",
@@ -121,6 +120,20 @@ func New() *Model {
 	ta.SetWidth(80)
 	ta.ShowLineNumbers = false
 	ta.KeyMap.InsertNewline.SetEnabled(true) // Shift+Enter inserts newline
+
+	// Clear all default gray/white backgrounds — pure transparent input
+	noBase := lipgloss.NewStyle().Background(lipgloss.NoColor{})
+	ta.FocusedStyle.Base = noBase
+	ta.BlurredStyle.Base = noBase
+	ta.FocusedStyle.CursorLine = noBase
+	ta.BlurredStyle.CursorLine = noBase
+	ta.FocusedStyle.Text = lipgloss.NewStyle().Foreground(colorText)
+	ta.BlurredStyle.Text = lipgloss.NewStyle().Foreground(colorSubtle)
+	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
+	ta.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
+	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(colorBrand)
+	ta.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(colorMuted)
+	ta.Cursor.Style = lipgloss.NewStyle().Foreground(colorBrand)
 	ta.Focus()
 
 	vp := viewport.New(80, 20)
@@ -187,6 +200,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			return m, cmd
+		case "shift+tab", "backtab":
+			m.cyclePhase()
+			return m, nil
 		case "shift+up":
 			m.viewport.LineUp(1)
 			return m, nil
@@ -209,9 +225,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Approval mode accepts immediate single-key responses (no Enter required).
+		if m.mode == modeApproval {
+			switch strings.ToLower(key) {
+			case "y", "n":
+				cmds = append(cmds, m.handleInput(strings.ToLower(key)))
+				return m, tea.Batch(cmds...)
+			}
+		}
+
 		// Enter submits; Shift+Enter / Alt+Enter handled by textarea (newline)
 		if msg.Type == tea.KeyEnter && !msg.Alt {
-			if m.busy {
+			// While busy, block regular commands but keep interactive prompts usable.
+			if m.busy && m.mode != modeApproval && m.onFreeText == nil {
 				return m, nil
 			}
 			text := strings.TrimSpace(m.textarea.Value())
@@ -296,11 +322,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prev.status = msg.status
 		}
 		if msg.line != "" {
-			line := msg.line
-			if len(line) > 50 {
-				line = line[:47] + "..."
-			}
-			prev.line = line
+			prev.line = truncate(msg.line, 50)
 		}
 		if !exists {
 			m.recalcLayout()
@@ -325,31 +347,31 @@ func (m *Model) handleInput(text string) tea.Cmd {
 
 	switch m.mode {
 	case modeApproval:
+		cbYes := m.onYes
+		cbNo := m.onNo
 		m.approvalQuestion = ""
-		m.setMode(modeIdle, "")
+		m.onYes = nil
+		m.onNo = nil
+		// Unlock input immediately — never hold the UI hostage waiting for a goroutine
+		m.busy = false
+		m.setMode(modeText, "")
 		m.recalcLayout()
-		lower := strings.ToLower(text)
-		if lower == "y" || lower == "yes" {
-			cb := m.onYes
-			m.onYes = nil
-			m.onNo = nil
-			if cb != nil {
-				go cb()
+		if strings.ToLower(text) == "y" || strings.ToLower(text) == "yes" {
+			if cbYes != nil {
+				go cbYes()
 			}
 		} else {
-			cb := m.onNo
-			m.onYes = nil
-			m.onNo = nil
-			if cb != nil {
-				go cb()
+			if cbNo != nil {
+				go cbNo()
 			}
 		}
 		return nil
 
-	case modeText:
+	case modeText, modeIdle:
 		if m.onFreeText != nil {
 			cb := m.onFreeText
 			m.onFreeText = nil
+			m.busy = true // set in the Update loop (not in goroutine) — no data race
 			m.setMode(modeIdle, "")
 			go cb(text)
 			return nil
@@ -480,13 +502,16 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) tea.Cmd {
 		m.addSuccess("Project initialized: " + m.project.ProjectName)
 		m.showHelp()
 	case "plan_done":
-		m.addSuccess("Plan approved! Type 'divide' to assign tasks.")
+		m.addSuccess("Plan approved.")
+		m.addSystem("  → type: divide    (break plan into agent tasks)")
 		send(agentActivityMsg{status: "clear"})
 	case "divide_done":
-		m.addSuccess("Tasks assigned! Type 'work' to start execution.")
+		m.addSuccess("Tasks assigned.")
+		m.addSystem("  → type: work    (execute all tasks)")
 		send(agentActivityMsg{status: "clear"})
 	case "work_done":
 		m.addSuccess("All tasks complete!")
+		m.addSystem("  → type: status    (review results)")
 		send(agentActivityMsg{status: "clear"})
 	}
 	m.setMode(modeText, "")
@@ -542,11 +567,45 @@ func (m *Model) showHelp() {
 		"  /clear                     clear chat history",
 		"  /help, /quit",
 		"",
+		"Phase shortcut: Shift+Tab (cycle init → plan → divide → work → done)",
 		"Scrolling: pgup/pgdn  •  shift+up/down  •  mouse wheel",
 		"Multi-line input: Shift+Enter",
 	} {
 		m.addSystem(l)
 	}
+}
+
+func (m *Model) cyclePhase() {
+	if m.project == nil {
+		m.addSystem("No project loaded.")
+		return
+	}
+	if m.busy {
+		m.addSystem("Cannot change phase while a command is running.")
+		return
+	}
+
+	order := []state.Phase{
+		state.PhaseInit,
+		state.PhasePlan,
+		state.PhaseDivide,
+		state.PhaseWork,
+		state.PhaseDone,
+	}
+	next := order[0]
+	for i, p := range order {
+		if m.project.Phase == p {
+			next = order[(i+1)%len(order)]
+			break
+		}
+	}
+
+	m.project.Phase = next
+	if err := state.SaveState(m.arosDir, m.project); err != nil {
+		m.addError("could not save phase: " + err.Error())
+		return
+	}
+	m.addSuccess("Phase changed → " + string(next))
 }
 
 func (m *Model) showAgents() {
