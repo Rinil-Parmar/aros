@@ -9,7 +9,6 @@ const (
 	kindHuman                  // user input echoed back
 	kindSuccess                // phase completion
 	kindError                  // error messages
-	kindStream                 // streaming agent line (appended to last agent msg)
 	kindBanner                 // welcome banner — re-rendered on resize
 )
 
@@ -36,11 +35,6 @@ type phaseResultMsg struct {
 	phase  string
 	result string
 	err    error
-}
-
-// inputModeMsg switches the input box label/placeholder.
-type inputModeMsg struct {
-	placeholder string
 }
 
 // approvalMsg requests a y/n response from the user.

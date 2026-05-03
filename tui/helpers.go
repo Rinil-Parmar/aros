@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 	"strings"
 
 	"github.com/Rinil-Parmar/aros/state"
@@ -109,4 +110,18 @@ func collectDepOutputs(task *state.Task, byID map[string]*state.Task) string {
 		parts = append(parts, fmt.Sprintf("=== %s [%s] ===\n%s", d.Title, d.ID, d.Output))
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// truncate clips s to maxRunes runes, appending "…" if clipped.
+// Uses rune count (not byte count) so multi-byte Unicode is safe.
+func truncate(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	n := utf8.RuneCountInString(s)
+	if n <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes-1]) + "…"
 }
