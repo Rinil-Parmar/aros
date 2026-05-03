@@ -97,6 +97,8 @@ var knownModels = map[string][]string{
 	},
 }
 
+var knownDenseLevels = []string{"", "lite", "full", "ultra"}
+
 var program *tea.Program
 
 func SetProgram(p *tea.Program) { program = p }
@@ -477,6 +479,38 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		}
 		m.addSuccess(fmt.Sprintf("Set %s model → %s", agentName, modelName))
 
+	case "/dense":
+		if len(parts) == 1 {
+			m.addSystem("Usage: /dense <agent> [level]")
+			m.addSystem("Levels: " + strings.Join(knownDenseLevels, ", "))
+			m.addSystem("")
+			for _, agentName := range []string{"claude", "opencode", "copilot"} {
+				if ac, ok := m.cfg.Agents[agentName]; ok {
+					level := ac.Dense
+					if level == "" {
+						level = "(off)"
+					}
+					m.addSystem(fmt.Sprintf("  %s: %s", agentName, level))
+				}
+			}
+			return nil
+		}
+		if len(parts) == 2 {
+			m.addSystem(fmt.Sprintf("Usage: /dense %s <level>", parts[1]))
+			m.addSystem("Levels: " + strings.Join(knownDenseLevels, ", "))
+			return nil
+		}
+		agentName, level := parts[1], parts[2]
+		if err := m.setAgentDense(agentName, level); err != nil {
+			m.addError(err.Error())
+			return nil
+		}
+		if level == "" {
+			m.addSuccess(fmt.Sprintf("%s dense mode → off", agentName))
+		} else {
+			m.addSuccess(fmt.Sprintf("%s dense mode → %s", agentName, level))
+		}
+
 	case "/judge":
 		if len(parts) < 2 {
 			m.addError("Usage: /judge <agent>   e.g. /judge claude")
@@ -562,6 +596,7 @@ func (m *Model) showHelp() {
 		"",
 		"Slash commands:",
 		"  /model <agent> <model>     change model for an agent",
+		"  /dense <agent> [level]     set dense output (lite|full|ultra)",
 		"  /judge <agent>             change which agent is the judge",
 		"  /agents                    show all configured agents",
 		"  /clear                     clear chat history",
@@ -804,6 +839,29 @@ func (m *Model) setAgentModel(agentName, modelName string) error {
 	ac.Enabled = true
 	m.cfg.Agents[agentName] = ac
 	return m.rebuildRegistry()
+}
+
+func (m *Model) setAgentDense(agentName, level string) error {
+	if m.cfg.Agents == nil {
+		return fmt.Errorf("no agents configured")
+	}
+	ac, ok := m.cfg.Agents[agentName]
+	if !ok {
+		return fmt.Errorf("unknown agent %q", agentName)
+	}
+	found := false
+	for _, valid := range knownDenseLevels {
+		if level == valid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown dense level %q; valid: %s", level, strings.Join(knownDenseLevels, ", "))
+	}
+	ac.Dense = level
+	m.cfg.Agents[agentName] = ac
+	return nil
 }
 
 func (m *Model) setJudge(agentName string) error {
