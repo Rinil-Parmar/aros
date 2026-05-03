@@ -11,6 +11,16 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+func (m *Model) ingestApprovedPlanAsync(projectName, plan string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := m.mem.Ingest(ctx, "Approved plan for "+projectName+":\n"+plan); err != nil {
+			send(streamLineMsg{agent: "aros", line: "warning: secondmem ingest failed: " + err.Error()})
+		}
+	}()
+}
+
 // runPlan runs the plan phase in a goroutine, sending bubbletea messages back.
 func (m *Model) runPlan(task string) {
 	if err := state.RequirePhase(m.project, false, state.PhaseInit, state.PhasePlan); err != nil {
@@ -18,7 +28,7 @@ func (m *Model) runPlan(task string) {
 		return
 	}
 
-	agents := m.reg.Enabled()
+	agents := m.reg.Enabled(m.cfg.Judge.Agent)
 	judge, err := m.reg.Judge(m.cfg.Judge.Agent)
 	if err != nil {
 		send(phaseResultMsg{err: err})
@@ -91,14 +101,14 @@ func (m *Model) runPlan(task string) {
 			m.project.ApprovedPlan = synthesis
 			m.project.Phase = state.PhasePlan
 			_ = state.SaveState(m.arosDir, m.project)
-			_ = m.mem.Ingest(context.Background(), "Approved plan for "+m.project.ProjectName+":\n"+synthesis)
 			send(phaseResultMsg{phase: "plan_done"})
+			m.ingestApprovedPlanAsync(m.project.ProjectName, synthesis)
 		},
 		onNo: func() {
 			send(freeInputMsg{
 				prompt: "What should change? (feedback for the judge)",
 				callback: func(feedback string) {
-					m.busy = true
+					// m.busy is set true in handleInput before this goroutine starts
 					send(agentActivityMsg{agent: "judge", model: judgeModel, status: "running", line: "revising plan..."})
 					retryPrompt := buildJudgePlanPrompt(task, plans, feedback)
 					ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -125,6 +135,7 @@ func (m *Model) runPlan(task string) {
 							m.project.Phase = state.PhasePlan
 							_ = state.SaveState(m.arosDir, m.project)
 							send(phaseResultMsg{phase: "plan_done"})
+							m.ingestApprovedPlanAsync(m.project.ProjectName, revised)
 						},
 						onNo: func() {
 							send(streamLineMsg{agent: "aros", line: "Cancelled. Type 'plan <task>' to start over."})
@@ -164,13 +175,19 @@ func (m *Model) runDivide() {
 	}
 	send(agentActivityMsg{agent: "judge", status: "done", line: "tasks generated"})
 
-	tasks, err := parseTasks(result.Output)
-	if err != nil {
-		// Retry once
-		retryResult, err2 := judge.Run(ctx, buildDividePrompt(m.project, m.cfg)+
-			"\n\nReturn ONLY a JSON array. No prose. No fences.")
-		if err2 != nil || func() bool { tasks, err = parseTasks(retryResult.Output); return err != nil }() {
-			send(phaseResultMsg{err: fmt.Errorf("could not parse task list: %w", err)})
+	tasks, parseErr := parseTasks(result.Output)
+	if parseErr != nil {
+		send(streamLineMsg{agent: "judge", line: "parse failed, retrying with stricter prompt..."})
+		retryPrompt := buildDividePrompt(m.project, m.cfg) +
+			"\n\nPrevious response could not be parsed as JSON. Return ONLY the JSON array — no markdown, no prose, no fences."
+		retryResult, err2 := judge.Run(ctx, retryPrompt)
+		if err2 != nil {
+			send(phaseResultMsg{err: fmt.Errorf("judge retry failed: %w", err2)})
+			return
+		}
+		tasks, parseErr = parseTasks(retryResult.Output)
+		if parseErr != nil {
+			send(phaseResultMsg{err: fmt.Errorf("could not parse task list after retry: %w", parseErr)})
 			return
 		}
 	}
@@ -215,7 +232,7 @@ func (m *Model) runDivide() {
 
 // runWork runs the work phase in a goroutine.
 func (m *Model) runWork() {
-	if err := state.RequirePhase(m.project, false, state.PhaseDivide); err != nil {
+	if err := state.RequirePhase(m.project, false, state.PhaseDivide, state.PhaseWork); err != nil {
 		send(phaseResultMsg{err: err})
 		return
 	}
@@ -229,6 +246,13 @@ func (m *Model) runWork() {
 	for i := range manifest.Tasks {
 		byID[manifest.Tasks[i].ID] = &manifest.Tasks[i]
 	}
+	if len(byID) == 0 {
+		send(phaseResultMsg{err: fmt.Errorf("no tasks to execute; run divide first")})
+		return
+	}
+
+	m.project.Phase = state.PhaseWork
+	_ = state.SaveState(m.arosDir, m.project)
 
 	maxConcurrent := m.cfg.Work.MaxConcurrent
 	if maxConcurrent < 1 {
@@ -244,14 +268,17 @@ func (m *Model) runWork() {
 
 	for {
 		mu.Lock()
-		allDone := true
+		done, blocked, total := 0, 0, len(byID)
 		for _, t := range byID {
-			if t.Status != state.TaskDone {
-				allDone = false
-				break
+			switch t.Status {
+			case state.TaskDone:
+				done++
+			case state.TaskBlocked:
+				blocked++
 			}
 		}
-		if !allDone {
+		finished := done+blocked == total
+		if !finished {
 			for _, t := range byID {
 				if dispatched[t.ID] || t.Status == state.TaskDone {
 					continue
@@ -259,6 +286,7 @@ func (m *Model) runWork() {
 				if depsComplete(t, byID) {
 					dispatched[t.ID] = true
 					t.Status = state.TaskInProgress
+					t.BlockReason = ""
 					_ = state.SaveManifest(m.arosDir, manifest)
 					sem <- struct{}{}
 					go func(task *state.Task) {
@@ -269,7 +297,12 @@ func (m *Model) runWork() {
 			}
 		}
 		mu.Unlock()
-		if allDone {
+		if finished {
+			if blocked > 0 {
+				_ = state.SaveManifest(m.arosDir, manifest)
+				send(phaseResultMsg{err: fmt.Errorf("%d task(s) blocked, %d done. Fix blockers and run 'work' again to resume", blocked, done)})
+				return
+			}
 			break
 		}
 		<-ticker.C
@@ -335,7 +368,10 @@ func (m *Model) execTask(task *state.Task, mu *sync.Mutex, byID map[string]*stat
 	task.Output = result.Output
 	_ = state.SaveManifest(m.arosDir, manifest)
 	mu.Unlock()
-	_ = m.mem.Ingest(context.Background(), fmt.Sprintf("Task %s (%s):\n%s", task.ID, task.Title, result.Output))
 	send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✓ done", task.ID)})
 	send(agentActivityMsg{agent: task.AssignedTo, status: "done", line: fmt.Sprintf("[%s] done", task.ID)})
+	// ingest after reporting done — never block task completion progress
+	go func() {
+		_ = m.mem.Ingest(context.Background(), fmt.Sprintf("Task %s (%s):\n%s", task.ID, task.Title, result.Output))
+	}()
 }
