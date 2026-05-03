@@ -48,8 +48,8 @@ func (m *Model) recalcLayout() {
 		m.rightW = 0
 	}
 
-	m.viewport.Width = m.leftW - 2  // subtract rounded border sides
-	m.viewport.Height = m.colH - 2  // subtract rounded border top/bottom
+	m.viewport.Width = m.leftW - 2 // subtract rounded border sides
+	m.viewport.Height = m.colH - 2 // subtract rounded border top/bottom
 }
 
 // ── Top-level View ─────────────────────────────────────────────────────────────
@@ -88,7 +88,18 @@ func (m *Model) renderHeader() string {
 
 	projName := lipgloss.NewStyle().Foreground(colorSubtle).Render("no project")
 	if m.project != nil {
-		projName = lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(m.project.ProjectName)
+		label := m.project.ProjectName
+		if m.sessionName != "" && m.sessionName != m.project.ProjectName {
+			label = fmt.Sprintf("%s  [%s]", label, m.sessionName)
+		} else if m.sessionID != "" {
+			// fall back to short ID (last 8 chars)
+			short := m.sessionID
+			if len(short) > 8 {
+				short = short[len(short)-8:]
+			}
+			label = fmt.Sprintf("%s  [%s]", label, short)
+		}
+		projName = lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(label)
 	}
 
 	brandW := lipgloss.Width(brand)
@@ -181,7 +192,7 @@ func (m *Model) renderRightPanel() string {
 			}
 			sb.WriteString(" " + icon + " " + nameStr + modelStr + "\n")
 			if a.line != "" {
-				sb.WriteString(styleActivityLine.Render("   " + truncate(a.line, w-4)) + "\n")
+				sb.WriteString(styleActivityLine.Render("   "+truncate(a.line, w-4)) + "\n")
 			}
 		}
 		sb.WriteString("\n")
@@ -215,18 +226,31 @@ func (m *Model) renderRightPanel() string {
 	}
 	sb.WriteString("\n")
 
-	// ── Task Board ────────────────────────────────────────────────────────────
-	sb.WriteString(rpSectionTitle("Task Board", w))
+	// ── Session / Task Board ──────────────────────────────────────────────────
+	sb.WriteString(rpSectionTitle("Session", w))
 	if m.project == nil {
 		sb.WriteString(styleActivityLine.Render(" No project") + "\n")
-		sb.WriteString(styleActivityLine.Render(" Enter a name to init") + "\n")
+		sb.WriteString(styleActivityLine.Render(" /session new <name>") + "\n")
 		return sb.String()
 	}
+	sessLabel := m.project.ProjectName
+	if m.sessionName != "" {
+		sessLabel = m.sessionName
+	}
+	sb.WriteString(" " + lipgloss.NewStyle().Foreground(colorText).Render(truncate(sessLabel, w-2)) + "\n")
+	if m.sessionID != "" {
+		short := m.sessionID
+		if len(short) > 13 {
+			short = "…" + short[len(short)-12:]
+		}
+		sb.WriteString(styleActivityLine.Render(" "+short) + "\n")
+	}
+	phaseRow := " Phase  " + phaseBadge(m.project.Phase)
+	sb.WriteString(phaseRow + "\n\n")
 
+	sb.WriteString(rpSectionTitle("Tasks", w))
 	manifest, err := state.LoadManifest(m.arosDir)
 	if err != nil || len(manifest.Tasks) == 0 {
-		phaseRow := " Phase  " + phaseBadge(m.project.Phase)
-		sb.WriteString(phaseRow + "\n")
 		if m.project.Task != "" {
 			sb.WriteString(styleActivityLine.Render(" "+truncate(m.project.Task, w-2)) + "\n")
 		} else {
@@ -342,7 +366,7 @@ func (m *Model) renderInputBox() string {
 		boxStyle = styleInputBorderBusy
 	}
 
-	return boxStyle.Width(m.width - 4).Render(content) + "\n"
+	return boxStyle.Width(m.width-4).Render(content) + "\n"
 }
 
 // ── Shortcuts bar ──────────────────────────────────────────────────────────────

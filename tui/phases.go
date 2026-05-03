@@ -11,6 +11,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const humanSentinel = "<<AROS_HUMAN>>"
+const maxHumanQuestionsPerTask = 5
+
 func (m *Model) ingestApprovedPlanAsync(projectName, plan string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -264,6 +267,9 @@ func (m *Model) runWork() {
 	send(streamLineMsg{agent: "aros", line: fmt.Sprintf("Starting %d tasks (max %d concurrent)...", len(manifest.Tasks), maxConcurrent)})
 
 	var mu sync.Mutex
+	// humanMu serializes <<AROS_HUMAN>> requests: at most one task can ask the
+	// user a question at a time, preventing freeInputMsg races.
+	var humanMu sync.Mutex
 	dispatched := make(map[string]bool)
 	sem := make(chan struct{}, maxConcurrent)
 	ticker := time.NewTicker(2 * time.Second)
@@ -283,7 +289,7 @@ func (m *Model) runWork() {
 		finished := done+blocked == total
 		if !finished {
 			for _, t := range byID {
-				if dispatched[t.ID] || t.Status == state.TaskDone {
+				if dispatched[t.ID] || t.Status == state.TaskDone || t.Status == state.TaskBlocked {
 					continue
 				}
 				if depsComplete(t, byID) {
@@ -294,7 +300,7 @@ func (m *Model) runWork() {
 					sem <- struct{}{}
 					go func(task *state.Task) {
 						defer func() { <-sem }()
-						m.execTask(task, &mu, byID, manifest)
+						m.execTask(task, &mu, &humanMu, byID, manifest)
 					}(t)
 				}
 			}
@@ -316,7 +322,7 @@ func (m *Model) runWork() {
 	send(phaseResultMsg{phase: "work_done"})
 }
 
-func (m *Model) execTask(task *state.Task, mu *sync.Mutex, byID map[string]*state.Task, manifest *state.TaskManifest) {
+func (m *Model) execTask(task *state.Task, mu, humanMu *sync.Mutex, byID map[string]*state.Task, manifest *state.TaskManifest) {
 	a, ok := m.reg[task.AssignedTo]
 	if !ok {
 		for _, av := range m.reg {
@@ -340,38 +346,87 @@ func (m *Model) execTask(task *state.Task, mu *sync.Mutex, byID map[string]*stat
 
 	memCtx := m.mem.Ask(context.Background(), task.Title)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.Work.AgentTimeoutSeconds)*time.Second)
-	defer cancel()
+	prompt := task.Description
+	questions := 0
 
-	workPrompt := withDense(buildWorkPrompt(task, depOutputs, memCtx), agentCfg)
-	result, err := a.Run(ctx, workPrompt)
-	if err != nil {
-		send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✗ error: %v", task.ID, err)})
-		send(agentActivityMsg{agent: task.AssignedTo, status: "error", line: err.Error()})
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.Work.AgentTimeoutSeconds)*time.Second)
+		workPrompt := withDense(buildWorkPrompt(task, prompt, depOutputs, memCtx), agentCfg)
+		result, err := a.Run(ctx, workPrompt)
+		cancel()
+		if err != nil {
+			send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✗ error: %v", task.ID, err)})
+			send(agentActivityMsg{agent: task.AssignedTo, status: "error", line: err.Error()})
+			mu.Lock()
+			task.Status = state.TaskBlocked
+			task.BlockReason = err.Error()
+			_ = state.SaveManifest(m.arosDir, manifest)
+			mu.Unlock()
+			return
+		}
+
+		if strings.Contains(result.Output, humanSentinel) {
+			if questions >= maxHumanQuestionsPerTask {
+				mu.Lock()
+				task.Status = state.TaskBlocked
+				task.BlockReason = "exceeded max human questions"
+				_ = state.SaveManifest(m.arosDir, manifest)
+				mu.Unlock()
+				send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✗ blocked: too many human decisions", task.ID)})
+				send(agentActivityMsg{agent: task.AssignedTo, status: "error", line: "blocked: too many human decisions"})
+				return
+			}
+			// Serialize all human questions: only one task may ask at a time.
+			// Without this, two concurrent tasks could both send freeInputMsg,
+			// the second overwrites m.onFreeText, and the first blocks on answerCh forever.
+			humanMu.Lock()
+			question := extractHumanQuestion(result.Output)
+			send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] needs input: %s", task.ID, question)})
+			answerCh := make(chan string, 1)
+			send(freeInputMsg{
+				prompt: fmt.Sprintf("[%s] %s", task.ID, question),
+				callback: func(text string) {
+					answerCh <- text
+				},
+			})
+			answer := <-answerCh
+			humanMu.Unlock()
+			prompt = task.Description + "\n\nPrevious attempt:\n" + result.Output +
+				"\n\nHuman answer to your question:\n" + answer + "\n\nContinue and complete the task."
+			questions++
+			continue
+		}
+
+		for _, line := range strings.Split(result.Output, "\n") {
+			if strings.TrimSpace(line) != "" {
+				send(streamLineMsg{agent: task.AssignedTo, line: line})
+				send(agentActivityMsg{agent: task.AssignedTo, line: line})
+			}
+		}
+
 		mu.Lock()
-		task.Status = state.TaskBlocked
-		task.BlockReason = err.Error()
+		task.Status = state.TaskDone
+		task.Output = result.Output
 		_ = state.SaveManifest(m.arosDir, manifest)
 		mu.Unlock()
+		send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✓ done", task.ID)})
+		send(agentActivityMsg{agent: task.AssignedTo, status: "done", line: fmt.Sprintf("[%s] done", task.ID)})
+		// ingest after reporting done — never block task completion progress
+		go func() {
+			_ = m.mem.Ingest(context.Background(), fmt.Sprintf("Task %s (%s):\n%s", task.ID, task.Title, result.Output))
+		}()
 		return
 	}
+}
 
-	for _, line := range strings.Split(result.Output, "\n") {
-		if strings.TrimSpace(line) != "" {
-			send(streamLineMsg{agent: task.AssignedTo, line: line})
-			send(agentActivityMsg{agent: task.AssignedTo, line: line})
-		}
+func extractHumanQuestion(output string) string {
+	idx := strings.Index(output, humanSentinel)
+	if idx == -1 {
+		return output
 	}
-
-	mu.Lock()
-	task.Status = state.TaskDone
-	task.Output = result.Output
-	_ = state.SaveManifest(m.arosDir, manifest)
-	mu.Unlock()
-	send(streamLineMsg{agent: task.AssignedTo, line: fmt.Sprintf("[%s] ✓ done", task.ID)})
-	send(agentActivityMsg{agent: task.AssignedTo, status: "done", line: fmt.Sprintf("[%s] done", task.ID)})
-	// ingest after reporting done — never block task completion progress
-	go func() {
-		_ = m.mem.Ingest(context.Background(), fmt.Sprintf("Task %s (%s):\n%s", task.ID, task.Title, result.Output))
-	}()
+	q := strings.TrimSpace(output[idx+len(humanSentinel):])
+	if q == "" {
+		return "(agent needs input but did not specify a question)"
+	}
+	return q
 }

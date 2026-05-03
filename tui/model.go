@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/Rinil-Parmar/aros/agent"
 	"github.com/Rinil-Parmar/aros/config"
@@ -58,6 +57,8 @@ type Model struct {
 
 	activity         map[string]*agentStatus
 	approvalQuestion string
+	sessionID        string
+	sessionName      string
 
 	// layout cache — computed by recalcLayout, used by view.go
 	leftW  int
@@ -175,6 +176,10 @@ func (m *Model) bootstrap() tea.Cmd {
 
 		if s, err := state.LoadState(m.arosDir); err == nil {
 			m.project = s
+			if meta, err := state.ActiveSession(m.arosDir); err == nil {
+				m.sessionID = meta.ID
+				m.sessionName = meta.Name
+			}
 		}
 
 		return phaseResultMsg{phase: "bootstrap"}
@@ -522,6 +527,107 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		}
 		m.addSuccess("Judge agent → " + parts[1])
 
+	case "/session":
+		if len(parts) == 1 {
+			m.addSystem("Usage: /session <new|list|use|rm> [args]")
+			return nil
+		}
+		sub := strings.ToLower(parts[1])
+		switch sub {
+		case "list":
+			m.showSessions()
+			return nil
+		case "new":
+			force := hasForceFlag(parts)
+			if m.busy && !force {
+				m.addError("Cannot change session while a command is running. Use --force to override.")
+				return nil
+			}
+			if m.busy && force {
+				m.addSystem("Warning: switching sessions while work is running may leave tasks incomplete.")
+				m.busy = false
+				send(agentActivityMsg{status: "clear"})
+			}
+			name := strings.Join(stripFlags(parts[2:]), " ")
+			if name == "" {
+				m.onFreeText = func(t string) {
+					if err := m.createSession(t); err != nil {
+						m.addError(err.Error())
+					}
+				}
+				m.addSystem("Session name?")
+				m.setMode(modeText, "session name")
+				return nil
+			}
+			if err := m.createSession(name); err != nil {
+				m.addError(err.Error())
+			}
+			return nil
+		case "use":
+			force := hasForceFlag(parts)
+			if m.busy && !force {
+				m.addError("Cannot change session while a command is running. Use --force to override.")
+				return nil
+			}
+			if m.busy && force {
+				m.addSystem("Warning: switching sessions while work is running may leave tasks incomplete.")
+				m.busy = false
+				send(agentActivityMsg{status: "clear"})
+			}
+			id := firstArg(parts[2:])
+			if id == "" {
+				m.addError("Usage: /session use <id>")
+				return nil
+			}
+			if err := m.useSession(id); err != nil {
+				m.addError(err.Error())
+			}
+			return nil
+		case "rm":
+			force := hasForceFlag(parts)
+			if m.busy && !force {
+				m.addError("Cannot change session while a command is running. Use --force to override.")
+				return nil
+			}
+			if m.busy && force {
+				m.addSystem("Warning: switching sessions while work is running may leave tasks incomplete.")
+				m.busy = false
+				send(agentActivityMsg{status: "clear"})
+			}
+			id := firstArg(parts[2:])
+			if id == "" {
+				m.addError("Usage: /session rm <id> [--force]")
+				return nil
+			}
+			if err := m.removeSession(id, force); err != nil {
+				m.addError(err.Error())
+			}
+			return nil
+		default:
+			m.addError("Usage: /session <new|list|use|rm> [args]")
+			return nil
+		}
+
+	case "/phase":
+		if len(parts) < 2 {
+			m.addError("Usage: /phase <init|plan|divide|work|done> [--force]")
+			return nil
+		}
+		force := hasForceFlag(parts)
+		if m.busy && !force {
+			m.addError("Cannot change phase while a command is running. Use --force to override.")
+			return nil
+		}
+		if m.busy && force {
+			m.addSystem("Warning: changing phase while work is running may leave tasks incomplete.")
+			m.busy = false
+			send(agentActivityMsg{status: "clear"})
+		}
+		if err := m.setPhase(parts[1]); err != nil {
+			m.addError(err.Error())
+		}
+		return nil
+
 	default:
 		m.addSystem("Unknown slash command. Try /help")
 	}
@@ -545,7 +651,9 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) tea.Cmd {
 		send(agentActivityMsg{status: "clear"})
 	case "work_done":
 		m.addSuccess("All tasks complete!")
-		m.addSystem("  → type: status    (review results)")
+		m.addSystem("  → status                    review results")
+		m.addSystem("  → /session new <name>       start a new project")
+		m.addSystem("  → /phase init               reset this session")
 		send(agentActivityMsg{status: "clear"})
 	}
 	m.setMode(modeText, "")
@@ -599,6 +707,8 @@ func (m *Model) showHelp() {
 		"  /dense <agent> [level]     set dense output (lite|full|ultra)",
 		"  /judge <agent>             change which agent is the judge",
 		"  /agents                    show all configured agents",
+		"  /session <new|list|use|rm>  manage sessions",
+		"  /phase <phase> [--force]    set phase (init|plan|divide|work|done)",
 		"  /clear                     clear chat history",
 		"  /help, /quit",
 		"",
@@ -658,12 +768,163 @@ func (m *Model) showAgents() {
 	}
 }
 
+func (m *Model) showSessions() {
+	sessions, err := state.ListSessions(m.arosDir)
+	if err != nil {
+		m.addError(err.Error())
+		return
+	}
+	activeID, _ := state.ActiveSessionID(m.arosDir)
+	if len(sessions) == 0 {
+		m.addSystem("No sessions found.")
+		return
+	}
+	m.addSystem("Sessions:")
+	for _, s := range sessions {
+		prefix := " "
+		if s.ID == activeID {
+			prefix = "*"
+		}
+		m.addSystem(fmt.Sprintf("  %s %s  %s", prefix, s.ID, s.Name))
+	}
+}
+
+func (m *Model) createSession(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("session name cannot be empty")
+	}
+	meta, s, err := state.CreateSession(m.arosDir, name)
+	if err != nil {
+		return err
+	}
+	if err := state.SetActiveSession(m.arosDir, meta.ID); err != nil {
+		return err
+	}
+	m.project = s
+	m.sessionID = meta.ID
+	m.sessionName = meta.Name
+	m.addSuccess(fmt.Sprintf("Session created → %s (%s)", meta.Name, meta.ID))
+	m.busy = false
+	return nil
+}
+
+func (m *Model) useSession(id string) error {
+	if err := state.SetActiveSession(m.arosDir, id); err != nil {
+		return err
+	}
+	s, err := state.LoadState(m.arosDir)
+	if err != nil {
+		return err
+	}
+	meta, err := state.ActiveSession(m.arosDir)
+	if err == nil {
+		m.sessionID = meta.ID
+		m.sessionName = meta.Name
+	} else {
+		m.sessionID = id
+		m.sessionName = ""
+	}
+	m.project = s
+	m.addSuccess(fmt.Sprintf("Active session → %s", id))
+	return nil
+}
+
+func (m *Model) removeSession(id string, force bool) error {
+	activeID, _ := state.ActiveSessionID(m.arosDir)
+	if id == activeID && !force {
+		return fmt.Errorf("cannot remove active session without --force")
+	}
+	if err := state.RemoveSession(m.arosDir, id); err != nil {
+		return err
+	}
+	if id == activeID {
+		sessions, err := state.ListSessions(m.arosDir)
+		if err != nil {
+			return err
+		}
+		if len(sessions) > 0 {
+			if err := state.SetActiveSession(m.arosDir, sessions[0].ID); err != nil {
+				return err
+			}
+			if s, err := state.LoadState(m.arosDir); err == nil {
+				m.project = s
+			}
+			m.sessionID = sessions[0].ID
+			m.sessionName = sessions[0].Name
+		} else {
+			if err := state.ClearActiveSession(m.arosDir); err != nil {
+				return err
+			}
+			m.project = nil
+			m.sessionID = ""
+			m.sessionName = ""
+		}
+	}
+	m.addSuccess(fmt.Sprintf("Session removed → %s", id))
+	return nil
+}
+
+func (m *Model) setPhase(phaseInput string) error {
+	if m.project == nil {
+		return fmt.Errorf("no project loaded")
+	}
+	phase, ok := state.ParsePhase(strings.ToLower(phaseInput))
+	if !ok {
+		return fmt.Errorf("unknown phase %q (valid: init, plan, divide, work, done)", phaseInput)
+	}
+	if m.project.Phase == phase {
+		m.addSystem(fmt.Sprintf("Phase already %q", phase))
+		return nil
+	}
+	m.project.Phase = phase
+	if err := state.SaveState(m.arosDir, m.project); err != nil {
+		return err
+	}
+	m.addSuccess("Phase changed → " + string(phase))
+	return nil
+}
+
+func hasForceFlag(parts []string) bool {
+	for _, p := range parts {
+		if p == "--force" {
+			return true
+		}
+	}
+	return false
+}
+
+func stripFlags(parts []string) []string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if strings.HasPrefix(p, "-") {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func firstArg(parts []string) string {
+	for _, p := range parts {
+		if strings.HasPrefix(p, "-") {
+			continue
+		}
+		return p
+	}
+	return ""
+}
+
 func (m *Model) showStatus() {
 	if m.project == nil {
 		m.addSystem("No project loaded.")
 		return
 	}
-	m.addSystem(fmt.Sprintf("Project: %s  |  Phase: %s", m.project.ProjectName, m.project.Phase))
+	if m.sessionID != "" {
+		m.addSystem(fmt.Sprintf("Project: %s  |  Session: %s  |  Phase: %s", m.project.ProjectName, m.sessionID, m.project.Phase))
+	} else {
+		m.addSystem(fmt.Sprintf("Project: %s  |  Phase: %s", m.project.ProjectName, m.project.Phase))
+	}
 	if m.project.Task != "" {
 		m.addSystem("Task: " + m.project.Task)
 	}
@@ -811,18 +1072,18 @@ func (m *Model) initProject(name string) tea.Cmd {
 		if err := os.MkdirAll(m.arosDir, 0755); err != nil {
 			return phaseResultMsg{err: err}
 		}
-		s := &state.ProjectState{
-			ProjectName: name,
-			Phase:       state.PhaseInit,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
+		meta, s, err := state.CreateSession(m.arosDir, name)
+		if err != nil {
+			return phaseResultMsg{err: err}
 		}
-		if err := state.SaveState(m.arosDir, s); err != nil {
+		if err := state.SetActiveSession(m.arosDir, meta.ID); err != nil {
 			return phaseResultMsg{err: err}
 		}
 		_ = os.WriteFile(filepath.Join(m.arosDir, "config.toml"),
 			[]byte("# Aros project config — see ~/.aros/config.toml for global defaults\n"), 0644)
 		m.project = s
+		m.sessionID = meta.ID
+		m.sessionName = meta.Name
 		return phaseResultMsg{phase: "init"}
 	}
 }

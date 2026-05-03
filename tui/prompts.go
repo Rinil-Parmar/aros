@@ -86,11 +86,11 @@ func buildDividePrompt(s *state.ProjectState, cfg *config.Config) string {
 	return sb.String()
 }
 
-func buildWorkPrompt(task *state.Task, depOutputs, memCtx string) string {
+func buildWorkPrompt(task *state.Task, basePrompt, depOutputs, memCtx string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Task [%s]: %s\n\n", task.ID, task.Title))
 	sb.WriteString("DESCRIPTION:\n")
-	sb.WriteString(task.Description)
+	sb.WriteString(basePrompt)
 	if depOutputs != "" {
 		sb.WriteString("\n\nPREREQUISITE TASK OUTPUTS:\n")
 		sb.WriteString(depOutputs)
