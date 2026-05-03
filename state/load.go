@@ -17,7 +17,11 @@ func stateFilePath(arosDir string) string    { return filepath.Join(arosDir, sta
 func manifestFilePath(arosDir string) string { return filepath.Join(arosDir, manifestFile) }
 
 func LoadState(arosDir string) (*ProjectState, error) {
-	data, err := os.ReadFile(stateFilePath(arosDir))
+	id, err := ensureActiveSessionID(arosDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading state: %w", err)
+	}
+	data, err := os.ReadFile(sessionStatePath(arosDir, id))
 	if err != nil {
 		return nil, fmt.Errorf("reading state: %w", err)
 	}
@@ -30,11 +34,22 @@ func LoadState(arosDir string) (*ProjectState, error) {
 
 func SaveState(arosDir string, s *ProjectState) error {
 	s.UpdatedAt = time.Now()
-	return writeJSON(stateFilePath(arosDir), s)
+	id, err := ensureActiveSessionID(arosDir)
+	if err != nil {
+		return err
+	}
+	if err := writeJSON(sessionStatePath(arosDir, id), s); err != nil {
+		return err
+	}
+	return updateSessionMeta(arosDir, id, s.ProjectName)
 }
 
 func LoadManifest(arosDir string) (*TaskManifest, error) {
-	data, err := os.ReadFile(manifestFilePath(arosDir))
+	id, err := ensureActiveSessionID(arosDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading manifest: %w", err)
+	}
+	data, err := os.ReadFile(sessionManifestPath(arosDir, id))
 	if err != nil {
 		return nil, fmt.Errorf("reading manifest: %w", err)
 	}
@@ -46,7 +61,14 @@ func LoadManifest(arosDir string) (*TaskManifest, error) {
 }
 
 func SaveManifest(arosDir string, m *TaskManifest) error {
-	return writeJSON(manifestFilePath(arosDir), m)
+	id, err := ensureActiveSessionID(arosDir)
+	if err != nil {
+		return err
+	}
+	if err := writeJSON(sessionManifestPath(arosDir, id), m); err != nil {
+		return err
+	}
+	return updateSessionMeta(arosDir, id, "")
 }
 
 // writeJSON writes v as JSON to path using a unique temp file + rename for atomicity.

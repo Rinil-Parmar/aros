@@ -21,6 +21,20 @@ var PhaseOrder = map[Phase]int{
 	PhaseDone:   4,
 }
 
+var KnownPhases = []Phase{
+	PhaseInit,
+	PhasePlan,
+	PhaseDivide,
+	PhaseWork,
+	PhaseDone,
+}
+
+func ParsePhase(v string) (Phase, bool) {
+	p := Phase(v)
+	_, ok := PhaseOrder[p]
+	return p, ok
+}
+
 type ProjectState struct {
 	ProjectName  string    `json:"project_name"`
 	Phase        Phase     `json:"phase"`
