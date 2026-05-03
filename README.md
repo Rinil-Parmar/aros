@@ -103,6 +103,8 @@ Launch `aros` with no arguments to open the interactive TUI.
 | `/model <agent> <model>` | Change an agent's model |
 | `/judge <agent>` | Change the judge agent |
 | `/agents` | List all configured agents |
+| `/session <new|list|use|rm>` | Manage sessions |
+| `/phase <phase>` | Set phase (init|plan|divide|work|done) |
 | `help` | Show all commands |
 
 ---
@@ -193,6 +195,29 @@ aros status
 
 Shows current phase and task statuses at any point.
 
+### Sessions
+
+```bash
+aros session new "feature branch"
+aros session list
+aros session use <id>
+aros session rm <id>
+```
+
+Sessions let you keep multiple workflows under the same project directory.
+
+### Change phase
+
+```bash
+aros phase init
+aros phase plan
+aros phase divide
+aros phase work
+aros phase done
+```
+
+Use this to move backward or forward explicitly.
+
 ---
 
 ## Configuration
@@ -273,9 +298,13 @@ All state lives in `.aros/` inside your project directory:
 
 ```
 .aros/
-├── config.toml     # project-level config
-├── state.json      # current phase, task, approved plan
-└── manifest.json   # task list with assignments and statuses
+├── config.toml             # project-level config
+├── active-session.json     # pointer to active session
+└── sessions/
+    └── <session-id>/
+        ├── session.json    # session metadata
+        ├── state.json      # current phase, task, approved plan
+        └── manifest.json   # task list with assignments and statuses
 ```
 
 State transitions are forward-only. Use `--force` to re-run a phase.
@@ -312,5 +341,4 @@ Aros never proceeds past a critical decision without your approval:
 - [ ] `aros retry <task-id>` — re-run a single failed task
 - [ ] Per-run log of agent prompts and outputs (`.aros/runs/`)
 - [ ] `aros export` — export full session as markdown report
-- [ ] `<<AROS_HUMAN>>` decision loop in TUI work phase (parity with CLI)
 - [ ] Persist `/model` and `/judge` TUI changes to config file
