@@ -12,7 +12,6 @@ import (
 // ── Layout ─────────────────────────────────────────────────────────────────────
 
 // recalcLayout computes leftW/rightW/colH and resizes the viewport.
-// Called on every window resize, mode change, or approval card toggle.
 func (m *Model) recalcLayout() {
 	if m.width == 0 || m.height == 0 {
 		return
@@ -20,7 +19,7 @@ func (m *Model) recalcLayout() {
 
 	approvalH := 0
 	if m.mode == modeApproval {
-		approvalH = 3 // ╭ + content + ╰
+		approvalH = 3
 	}
 
 	taH := m.textarea.Height()
@@ -28,24 +27,29 @@ func (m *Model) recalcLayout() {
 		taH = 1
 	}
 
-	// header(1) + colH + approvalH + border_top(1) + taH + border_bot(1) + shortcuts(1)
-	// = colH + 4 + taH + approvalH = height
-	m.colH = m.height - 4 - taH - approvalH
+	// header(2: text+border) + colH + approvalH + inputBox(taH+2) + shortcuts(1)
+	m.colH = m.height - 5 - taH - approvalH
 	if m.colH < 3 {
 		m.colH = 3
 	}
 
-	// Two-column only on wide terminals; fall back to single column below 100 chars
-	if m.width >= 100 {
-		m.leftW = (m.width * 66) / 100
-		m.rightW = m.width - m.leftW - 1 // -1 for │ separator
+	if m.width >= 90 {
+		m.leftW = (m.width * 68) / 100
+		if m.leftW < 50 {
+			m.leftW = 50
+		}
+		m.rightW = m.width - m.leftW - 1
+		if m.rightW < 30 {
+			m.rightW = 30
+			m.leftW = m.width - m.rightW - 1
+		}
 	} else {
 		m.leftW = m.width
 		m.rightW = 0
 	}
 
-	m.viewport.Width = m.leftW
-	m.viewport.Height = m.colH
+	m.viewport.Width = m.leftW - 2  // subtract rounded border sides
+	m.viewport.Height = m.colH - 2  // subtract rounded border top/bottom
 }
 
 // ── Top-level View ─────────────────────────────────────────────────────────────
@@ -56,6 +60,7 @@ func (m *Model) View() string {
 	}
 	var out strings.Builder
 	out.WriteString(m.renderHeader())
+	out.WriteString("\n")
 	out.WriteString(m.renderColumns())
 	if m.mode == modeApproval {
 		out.WriteString(m.renderApprovalCard())
@@ -73,89 +78,85 @@ func (m *Model) renderHeader() string {
 		w = 80
 	}
 
-	// Brand mark
-	brand := lipgloss.NewStyle().
-		Background(colorBrand).
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Bold(true).
-		Padding(0, 1).
-		Render(" ◆ AROS ")
+	brand := lipgloss.NewStyle().Foreground(colorBrand).Bold(true).Render(" ◆ AROS ")
 
-	// Project name
-	projName := lipgloss.NewStyle().
-		Background(colorSurface).
-		Foreground(colorSubtle).
-		Render("  no project")
-	if m.project != nil {
-		projName = lipgloss.NewStyle().
-			Background(colorSurface).
-			Foreground(colorText).
-			Bold(true).
-			Render("  " + m.project.ProjectName)
-	}
-
-	// Phase badge — right-aligned
 	phase := state.PhaseInit
 	if m.project != nil {
 		phase = m.project.Phase
 	}
-	badge := "  " + phaseBadge(phase) + " "
+	badge := phaseBadge(phase)
 
-	// Pad middle to fill width
-	brandLen := lipgloss.Width(brand)
-	projLen := lipgloss.Width(projName)
-	badgeLen := lipgloss.Width(badge)
-	padLen := w - brandLen - projLen - badgeLen
-	if padLen < 0 {
-		padLen = 0
+	projName := lipgloss.NewStyle().Foreground(colorSubtle).Render("no project")
+	if m.project != nil {
+		projName = lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(m.project.ProjectName)
 	}
-	pad := lipgloss.NewStyle().Background(colorSurface).Render(strings.Repeat(" ", padLen))
 
-	return brand + projName + pad + badge + "\n"
+	brandW := lipgloss.Width(brand)
+	projW := lipgloss.Width(projName)
+	badgeW := lipgloss.Width(badge)
+	padW := w - brandW - projW - badgeW - 4
+	if padW < 0 {
+		padW = 0
+	}
+	pad := strings.Repeat(" ", padW)
+
+	content := brand + "  " + projName + pad + badge + "  "
+	return styleHeader.Width(w - 2).Render(content)
 }
 
 // ── Two-column layout ──────────────────────────────────────────────────────────
 
 func (m *Model) renderColumns() string {
-	if m.rightW == 0 {
-		// Single column — narrow terminal
-		return m.viewport.View() + "\n"
-	}
+	mainH := m.colH
 
-	// Left panel: chat viewport, constrained to leftW×colH
-	leftContent := lipgloss.NewStyle().
+	// Left panel — rounded box containing the chat viewport
+	leftInner := m.viewport.View()
+	left := stylePanelBox.
 		Width(m.leftW).
-		Height(m.colH).
-		Render(m.viewport.View())
+		Height(mainH).
+		Render(leftInner)
 
-	// Separator: colH lines of │
-	var sepLines []string
-	for i := 0; i < m.colH; i++ {
-		sepLines = append(sepLines, styleVertSep.Render("│"))
+	if m.rightW == 0 {
+		return left + "\n"
 	}
-	sep := strings.Join(sepLines, "\n")
 
-	// Right panel: agent activity + config, constrained to rightW×colH
-	rightContent := lipgloss.NewStyle().
+	// Separator
+	sep := styleVertSep.Render(verticalSep(mainH + 2))
+
+	// Right panel — rounded box containing agents + task board
+	right := stylePanelBox.
 		Width(m.rightW).
-		Height(m.colH).
-		Background(colorSurface).
+		Height(mainH).
 		Render(m.renderRightPanel())
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, leftContent, sep, rightContent) + "\n"
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, sep, right) + "\n"
+}
+
+func verticalSep(lines int) string {
+	if lines <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i := 0; i < lines; i++ {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("│")
+	}
+	return b.String()
 }
 
 // ── Right panel ────────────────────────────────────────────────────────────────
 
 func (m *Model) renderRightPanel() string {
-	w := m.rightW
+	w := m.rightW - 2 // subtract box padding
 	if w < 8 {
 		return ""
 	}
 
 	var sb strings.Builder
 
-	// ── Activity section (when busy) ──────────────────────────────────────────
+	// ── Activity (while busy) ─────────────────────────────────────────────────
 	if m.busy && len(m.activity) > 0 {
 		sb.WriteString(rpSectionTitle("Activity", w))
 
@@ -167,40 +168,26 @@ func (m *Model) renderRightPanel() string {
 
 		for _, name := range names {
 			a := m.activity[name]
-
 			icon := m.spinner.View()
 			if a.status == "done" {
 				icon = styleActivityDone.Render("✓")
 			} else if a.status == "error" {
 				icon = styleActivityError.Render("✗")
 			}
-
-			nameStr := lipgloss.NewStyle().
-				Foreground(agentColor(name)).
-				Bold(true).
-				Render(name)
-
+			nameStr := lipgloss.NewStyle().Foreground(agentColor(name)).Bold(true).Render(name)
 			modelStr := ""
 			if a.model != "" {
-				modelStr = styleActivityModel.Render(" (" + a.model + ")")
+				modelStr = styleActivityModel.Render(" (" + truncate(a.model, 16) + ")")
 			}
-
-			row := fmt.Sprintf(" %s %s%s", icon, nameStr, modelStr)
-			sb.WriteString(rpLine(row, w))
-
+			sb.WriteString(" " + icon + " " + nameStr + modelStr + "\n")
 			if a.line != "" {
-				maxL := w - 4
-				line := a.line
-				if len(line) > maxL {
-					line = line[:maxL-1] + "…"
-				}
-				sb.WriteString(rpLine(styleActivityLine.Render("   "+line), w))
+				sb.WriteString(styleActivityLine.Render("   " + truncate(a.line, w-4)) + "\n")
 			}
 		}
-		sb.WriteString(rpBlank(w))
+		sb.WriteString("\n")
 	}
 
-	// ── Agents section ────────────────────────────────────────────────────────
+	// ── Agents ────────────────────────────────────────────────────────────────
 	sb.WriteString(rpSectionTitle("Agents", w))
 	if m.cfg != nil {
 		names := make([]string, 0, len(m.cfg.Agents))
@@ -214,76 +201,77 @@ func (m *Model) renderRightPanel() string {
 			if !ac.Enabled {
 				continue
 			}
-
 			dot := lipgloss.NewStyle().Foreground(agentColor(name)).Render("●")
-			nameStr := lipgloss.NewStyle().
-				Foreground(agentColor(name)).
-				Bold(true).
-				Width(9).
-				Render(name)
-
-			model := ac.Model
-			maxM := w - 14
-			if len(model) > maxM && maxM > 3 {
-				model = model[:maxM-1] + "…"
-			}
-			modelStr := lipgloss.NewStyle().Foreground(colorSubtle).Render(model)
-
+			nameStr := lipgloss.NewStyle().Foreground(agentColor(name)).Bold(true).Width(9).Render(name)
 			judgeTag := ""
 			if m.cfg.Judge.Agent == name {
 				judgeTag = lipgloss.NewStyle().Foreground(colorJudge).Render("★ ")
 			}
-
-			row := fmt.Sprintf(" %s %s%s%s", dot, nameStr, judgeTag, modelStr)
-			sb.WriteString(rpLine(row, w))
+			modelStr := lipgloss.NewStyle().Foreground(colorSubtle).Render(truncate(ac.Model, max(4, w-14)))
+			sb.WriteString(" " + dot + " " + nameStr + judgeTag + modelStr + "\n")
 		}
 	} else {
-		sb.WriteString(rpLine(styleActivityLine.Render(" loading…"), w))
+		sb.WriteString(styleActivityLine.Render(" loading…") + "\n")
 	}
-	sb.WriteString(rpBlank(w))
+	sb.WriteString("\n")
 
-	// ── Project section ───────────────────────────────────────────────────────
-	sb.WriteString(rpSectionTitle("Project", w))
-	if m.project != nil {
-		phaseRow := fmt.Sprintf(" Phase  %s", phaseBadge(m.project.Phase))
-		sb.WriteString(rpLine(phaseRow, w))
+	// ── Task Board ────────────────────────────────────────────────────────────
+	sb.WriteString(rpSectionTitle("Task Board", w))
+	if m.project == nil {
+		sb.WriteString(styleActivityLine.Render(" No project") + "\n")
+		sb.WriteString(styleActivityLine.Render(" Enter a name to init") + "\n")
+		return sb.String()
+	}
 
+	manifest, err := state.LoadManifest(m.arosDir)
+	if err != nil || len(manifest.Tasks) == 0 {
+		phaseRow := " Phase  " + phaseBadge(m.project.Phase)
+		sb.WriteString(phaseRow + "\n")
 		if m.project.Task != "" {
-			task := m.project.Task
-			maxT := w - 8
-			if len(task) > maxT && maxT > 3 {
-				task = task[:maxT-1] + "…"
-			}
-			sb.WriteString(rpLine(styleActivityLine.Render(" Task   "+task), w))
+			sb.WriteString(styleActivityLine.Render(" "+truncate(m.project.Task, w-2)) + "\n")
+		} else {
+			sb.WriteString(styleActivityLine.Render(" No tasks yet — run divide") + "\n")
 		}
-	} else {
-		sb.WriteString(rpLine(styleActivityLine.Render(" No project"), w))
-		sb.WriteString(rpLine(styleActivityLine.Render(" Enter a name to init"), w))
+		return sb.String()
+	}
+
+	for _, t := range manifest.Tasks {
+		badge := taskStatusBadge(t.Status)
+		title := truncate(t.Title, max(4, w-14))
+		titleStr := lipgloss.NewStyle().Foreground(colorText).Render(title)
+		ownerStr := lipgloss.NewStyle().Foreground(agentColor(t.AssignedTo)).Render(truncate(t.AssignedTo, 9))
+		sb.WriteString(fmt.Sprintf(" %s %s  %s\n", badge, titleStr, ownerStr))
+		if len(t.Dependencies) > 0 {
+			deps := "   deps: " + strings.Join(t.Dependencies, ", ")
+			sb.WriteString(styleActivityLine.Render(truncate(deps, w-2)) + "\n")
+		}
 	}
 
 	return sb.String()
 }
 
-// rpSectionTitle renders "─── Title ───────────────────\n" in the right panel.
+func taskStatusBadge(s state.TaskStatus) string {
+	switch s {
+	case state.TaskDone:
+		return styleTaskDone.Render("✓")
+	case state.TaskInProgress:
+		return styleTaskRun.Render("►")
+	case state.TaskBlocked:
+		return styleTaskBlocked.Render("✗")
+	default:
+		return styleTaskPending.Render("○")
+	}
+}
+
+// rpSectionTitle renders "─── Title ────────────────\n"
 func rpSectionTitle(title string, w int) string {
 	label := " " + title + " "
-	rest := w - len(label)
+	rest := w - lipgloss.Width(label) - 3
 	if rest < 0 {
 		rest = 0
 	}
-	return lipgloss.NewStyle().Background(colorSurface).Foreground(colorMuted).
-		Render(strings.Repeat("─", 1)+label+strings.Repeat("─", rest)) + "\n"
-}
-
-// rpLine pads a line to fill rightW and adds background color.
-func rpLine(content string, w int) string {
-	// We can't easily measure ANSI-escaped content width, so we let lipgloss Width handle it
-	return lipgloss.NewStyle().Background(colorSurface).Width(w).Render(content) + "\n"
-}
-
-// rpBlank returns an empty padded line for spacing.
-func rpBlank(w int) string {
-	return lipgloss.NewStyle().Background(colorSurface).Width(w).Render("") + "\n"
+	return lipgloss.NewStyle().Foreground(colorMuted).
+		Render(strings.Repeat("─", 3)+label+strings.Repeat("─", rest)) + "\n"
 }
 
 // ── Approval card ──────────────────────────────────────────────────────────────
@@ -299,20 +287,16 @@ func (m *Model) renderApprovalCard() string {
 	if q == "" {
 		q = "Approve?"
 	}
-	// Truncate if too long
-	maxQ := inner - 8
-	if len(q) > maxQ && maxQ > 3 {
-		q = q[:maxQ-1] + "…"
-	}
+	q = truncate(q, max(4, inner-8))
 
 	bc := styleApprovalBorder
 
 	topLabel := "─ ? " + q + " "
-	topPad := inner - len(topLabel) - 1
+	topPad := inner - lipgloss.Width(topLabel) - 1
 	if topPad < 0 {
 		topPad = 0
 	}
-	top := bc.Render("╭"+topLabel+strings.Repeat("─", topPad)+"╮")
+	top := bc.Render("╭" + topLabel + strings.Repeat("─", topPad) + "╮")
 
 	yesStr := styleApprovalYes.Render("[y]") + " Yes"
 	noStr := styleApprovalNo.Render("[n]") + " No"
@@ -322,7 +306,6 @@ func (m *Model) renderApprovalCard() string {
 		contentPad = 0
 	}
 	mid := bc.Render("│") + contentInner + strings.Repeat(" ", contentPad) + bc.Render("│")
-
 	bot := bc.Render("╰" + strings.Repeat("─", inner) + "╯")
 
 	return top + "\n" + mid + "\n" + bot + "\n"
@@ -331,25 +314,11 @@ func (m *Model) renderApprovalCard() string {
 // ── Input box ──────────────────────────────────────────────────────────────────
 
 func (m *Model) renderInputBox() string {
-	w := m.width
-	if w < 20 {
-		w = 80
-	}
-	inner := w - 2
-
-	bc := styleInputBorderActive
-	if m.busy {
-		bc = styleInputBorderBusy
-	}
-
-	hBar := strings.Repeat("─", inner)
-	top := bc.Render("╭" + hBar + "╮")
-	bot := bc.Render("╰" + hBar + "╯")
-
 	prefix := styleInputPrefix.Render("❯")
 	if m.busy {
 		prefix = m.spinner.View()
 	}
+
 	hint := ""
 	if m.mode == modeApproval {
 		hint = styleSystemMsg.Render("(y/n) ")
@@ -357,23 +326,23 @@ func (m *Model) renderInputBox() string {
 		hint = styleSystemMsg.Render("(" + m.prompt + ") ")
 	}
 
-	// textarea.View() may return multiple lines when input grows
 	taLines := strings.Split(m.textarea.View(), "\n")
-	var midLines []string
+	var lines []string
 	for i, line := range taLines {
-		var content string
 		if i == 0 {
-			content = fmt.Sprintf(" %s  %s%s", prefix, hint, line)
+			lines = append(lines, prefix+"  "+hint+line)
 		} else {
-			content = "      " + line // align continuation under text start
+			lines = append(lines, "     "+line)
 		}
-		midLine := bc.Render("│") +
-			lipgloss.NewStyle().Width(inner).MaxWidth(inner).Render(content) +
-			bc.Render("│")
-		midLines = append(midLines, midLine)
+	}
+	content := strings.Join(lines, "\n")
+
+	boxStyle := styleInputBorderActive
+	if m.busy {
+		boxStyle = styleInputBorderBusy
 	}
 
-	return top + "\n" + strings.Join(midLines, "\n") + "\n" + bot + "\n"
+	return boxStyle.Width(m.width - 4).Render(content) + "\n"
 }
 
 // ── Shortcuts bar ──────────────────────────────────────────────────────────────
@@ -392,11 +361,11 @@ func (m *Model) renderShortcutsBar() string {
 		{"wheel", "scroll"},
 	}
 
-	sep := lipgloss.NewStyle().Background(colorSurface).Foreground(colorDim).Render("  ·  ")
+	sep := lipgloss.NewStyle().Foreground(colorDim).Render("  ·  ")
 	var parts []string
 	for _, s := range shortcuts {
 		k := styleShortcutKey.Render(s.key)
-		d := lipgloss.NewStyle().Background(colorSurface).Foreground(colorSubtle).Render(" " + s.desc)
+		d := lipgloss.NewStyle().Foreground(colorSubtle).Render(" " + s.desc)
 		parts = append(parts, k+d)
 	}
 
@@ -407,19 +376,19 @@ func (m *Model) renderShortcutsBar() string {
 // ── Phase badge ────────────────────────────────────────────────────────────────
 
 func phaseBadge(phase state.Phase) string {
-	colors := map[state.Phase]string{
-		state.PhaseInit:   "#6B7280",
-		state.PhasePlan:   "#3B82F6",
+	colors := map[state.Phase]lipgloss.Color{
+		state.PhaseInit:   "#6B5C8A",
+		state.PhasePlan:   "#60A5FA",
 		state.PhaseDivide: "#F59E0B",
-		state.PhaseWork:   "#8B5CF6",
-		state.PhaseDone:   "#22C55E",
+		state.PhaseWork:   "#B084FF",
+		state.PhaseDone:   "#34D399",
 	}
-	c := "#6B7280"
+	c := lipgloss.Color("#6B5C8A")
 	if col, ok := colors[phase]; ok {
 		c = col
 	}
 	return lipgloss.NewStyle().
-		Background(lipgloss.Color(c)).
+		Background(c).
 		Foreground(lipgloss.Color("#FFFFFF")).
 		Bold(true).
 		Padding(0, 1).
@@ -433,9 +402,4 @@ func max(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// renderStatusBar kept for any legacy call sites.
-func (m *Model) renderStatusBar() string {
-	return m.renderShortcutsBar()
 }

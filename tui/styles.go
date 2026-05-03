@@ -5,39 +5,44 @@ import "github.com/charmbracelet/lipgloss"
 // ── Color tokens ───────────────────────────────────────────────────────────────
 
 var (
-	// Brand
-	colorBrand    = lipgloss.Color("#7C3AED") // purple
-	colorBrandDim = lipgloss.Color("#5B21B6") // darker purple
+	// Brand purple (matches OpenCodeTUI palette)
+	colorBrand    = lipgloss.Color("#B084FF")
+	colorBrandDim = lipgloss.Color("#7C3AED")
 
 	// Agent identity
 	colorClaude   = lipgloss.Color("#F59E0B") // amber
-	colorOpencode = lipgloss.Color("#3B82F6") // blue
-	colorCopilot  = lipgloss.Color("#06B6D4") // cyan
-	colorJudge    = lipgloss.Color("#10B981") // emerald
+	colorOpencode = lipgloss.Color("#60A5FA") // blue
+	colorCopilot  = lipgloss.Color("#34D399") // emerald
+	colorJudge    = lipgloss.Color("#EC7EF6") // pink
 
 	// Semantic
-	colorSuccess = lipgloss.Color("#22C55E")
-	colorError   = lipgloss.Color("#EF4444")
+	colorSuccess = lipgloss.Color("#34D399")
+	colorError   = lipgloss.Color("#FB7185")
 	colorWarning = lipgloss.Color("#F59E0B")
 
-	// Dark-theme neutrals
-	colorSurface = lipgloss.Color("#1E1E2E") // panel backgrounds
-	colorBorder  = lipgloss.Color("#2D2D3F") // panel borders / dividers
-	colorMuted   = lipgloss.Color("#4B5563") // secondary borders
-	colorSubtle  = lipgloss.Color("#6B7280") // deemphasised text
-	colorDim     = lipgloss.Color("#374151") // very subtle
-	colorText    = lipgloss.Color("#E5E7EB") // primary text
+	// Dark-theme neutrals (deep purple-tinted dark)
+	colorSurface = lipgloss.Color("#13111C") // panel background
+	colorBorder  = lipgloss.Color("#4B3470") // panel borders
+	colorMuted   = lipgloss.Color("#6B5C8A") // secondary borders
+	colorSubtle  = lipgloss.Color("#9D8CC4") // deemphasised text
+	colorDim     = lipgloss.Color("#2D2448") // very subtle
+	colorText    = lipgloss.Color("#ECE7FA") // primary text
 )
 
 // ── Layout styles ──────────────────────────────────────────────────────────────
 
 var (
-	// Header bar — full-width top bar
+	// Header — border-bottom line (OpenCodeTUI style)
 	styleHeader = lipgloss.NewStyle().
-			Background(colorSurface).
+			BorderBottom(true).
+			BorderForeground(colorBorder).
 			Foreground(colorText).
-			Bold(true).
-			Padding(0, 2)
+			Padding(0, 1)
+
+	// Panel boxes — rounded border (OpenCodeTUI style)
+	stylePanelBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorBorder)
 
 	// Vertical column separator │
 	styleVertSep = lipgloss.NewStyle().Foreground(colorBorder)
@@ -45,14 +50,8 @@ var (
 	// Horizontal thin rule
 	styleHRule = lipgloss.NewStyle().Foreground(colorMuted)
 
-	// Right panel section title
-	styleSectionTitle = lipgloss.NewStyle().
-				Foreground(colorSubtle).
-				Bold(true)
-
 	// Status / shortcuts bar at very bottom
 	styleShortcutsBar = lipgloss.NewStyle().
-				Background(colorSurface).
 				Foreground(colorSubtle).
 				Padding(0, 1)
 
@@ -62,9 +61,15 @@ var (
 				Bold(true).
 				Padding(0, 1)
 
-	// Input box border
-	styleInputBorderActive = lipgloss.NewStyle().Foreground(colorBrand)
-	styleInputBorderBusy   = lipgloss.NewStyle().Foreground(colorMuted)
+	// Input box border — active (purple) / busy (dim)
+	styleInputBorderActive = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorBrand).
+				Padding(0, 1)
+	styleInputBorderBusy = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorBorder).
+				Padding(0, 1)
 
 	// Approval card border
 	styleApprovalBorder = lipgloss.NewStyle().Foreground(colorWarning)
@@ -75,30 +80,11 @@ var (
 			Foreground(colorSubtle).
 			Italic(true)
 
-	styleErrorMsg = lipgloss.NewStyle().
-			Foreground(colorError).
-			Bold(true)
-
-	styleSuccessMsg = lipgloss.NewStyle().
-			Foreground(colorSuccess).
-			Bold(true)
-
-	styleHumanMsg = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#EC4899")).
-			Bold(true)
-
 	styleInputPrefix = lipgloss.NewStyle().
 				Foreground(colorBrand).
 				Bold(true)
 
 	// ── Activity / agent label styles ─────────────────────────────────────────
-
-	styleAgentLabel = func(color lipgloss.Color) lipgloss.Style {
-		return lipgloss.NewStyle().
-			Bold(true).
-			Foreground(color).
-			Width(12)
-	}
 
 	styleActivityModel = lipgloss.NewStyle().
 				Foreground(colorSubtle)
@@ -124,33 +110,12 @@ var (
 	styleApprovalNo = lipgloss.NewStyle().
 			Foreground(colorSubtle)
 
-	// ── Chat message blocks ───────────────────────────────────────────────────
+	// ── Task board status badges ──────────────────────────────────────────────
 
-	styleHumanBadge = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#EC4899")).
-			Bold(true)
-
-	styleMsgBody = lipgloss.NewStyle().
-			Foreground(colorText)
-
-	styleSystemLine = lipgloss.NewStyle().
-			Foreground(colorSubtle).
-			Italic(true)
-
-	// ── Misc ──────────────────────────────────────────────────────────────────
-
-	styleDivider     = lipgloss.NewStyle().Foreground(colorMuted)
-	styleTaskDone    = lipgloss.NewStyle().Foreground(colorSuccess)
+	styleTaskDone    = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
 	styleTaskPending = lipgloss.NewStyle().Foreground(colorSubtle)
-	// styleStatusBar kept for any legacy references
-	styleStatusBar = lipgloss.NewStyle().
-			Background(colorSurface).
-			Foreground(colorSubtle).
-			Padding(0, 1)
-	styleStatusSep = lipgloss.NewStyle().
-			Background(colorSurface).
-			Foreground(colorMuted).
-			SetString("  │  ")
+	styleTaskRun     = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
+	styleTaskBlocked = lipgloss.NewStyle().Foreground(colorError).Bold(true)
 )
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -168,10 +133,4 @@ func agentColor(name string) lipgloss.Color {
 	default:
 		return colorSubtle
 	}
-}
-
-func agentLabel(name string) string {
-	color := agentColor(name)
-	label := "[" + name + "]"
-	return styleAgentLabel(color).Render(label)
 }
