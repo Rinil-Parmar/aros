@@ -168,7 +168,7 @@ func (m *Model) renderRightPanel() string {
 	var sb strings.Builder
 
 	// ── Activity (while busy) ─────────────────────────────────────────────────
-	if m.busy && len(m.activity) > 0 {
+	if m.isBusy() && len(m.activity) > 0 {
 		sb.WriteString(rpSectionTitle("Activity", w))
 
 		names := make([]string, 0, len(m.activity))
@@ -249,8 +249,8 @@ func (m *Model) renderRightPanel() string {
 	sb.WriteString(phaseRow + "\n\n")
 
 	sb.WriteString(rpSectionTitle("Tasks", w))
-	manifest, err := state.LoadManifest(m.arosDir)
-	if err != nil || len(manifest.Tasks) == 0 {
+	manifest := m.manifest
+	if manifest == nil || len(manifest.Tasks) == 0 {
 		if m.project.Task != "" {
 			sb.WriteString(styleActivityLine.Render(" "+truncate(m.project.Task, w-2)) + "\n")
 		} else {
@@ -339,7 +339,7 @@ func (m *Model) renderApprovalCard() string {
 
 func (m *Model) renderInputBox() string {
 	prefix := styleInputPrefix.Render("❯")
-	if m.busy {
+	if m.isBusy() {
 		prefix = m.spinner.View()
 	}
 
@@ -362,7 +362,7 @@ func (m *Model) renderInputBox() string {
 	content := strings.Join(lines, "\n")
 
 	boxStyle := styleInputBorderActive
-	if m.busy {
+	if m.isBusy() {
 		boxStyle = styleInputBorderBusy
 	}
 

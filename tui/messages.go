@@ -1,5 +1,12 @@
 package tui
 
+import (
+	"github.com/Rinil-Parmar/aros/agent"
+	"github.com/Rinil-Parmar/aros/config"
+	"github.com/Rinil-Parmar/aros/memory"
+	"github.com/Rinil-Parmar/aros/state"
+)
+
 // msgKind classifies a chat message for display.
 type msgKind int
 
@@ -22,36 +29,59 @@ type ChatMessage struct {
 }
 
 // --- bubbletea msg types (internal events) ---
+//
+// Rule: background goroutines communicate with the model ONLY through these
+// messages (via send()). They never touch Model fields. Conversely, code that
+// already runs inside Update must never call send() — bubbletea's message
+// channel is unbuffered and Update runs on the receiving goroutine, so that
+// deadlocks the UI. Update-side code mutates the model directly instead.
+
+// bootstrapMsg carries everything loaded at startup.
+type bootstrapMsg struct {
+	cfg         *config.Config
+	reg         agent.Registry
+	warnings    []string
+	mem         *memory.SecondMem
+	project     *state.ProjectState
+	sessionID   string
+	sessionName string
+	arosDir     string
+	cwd         string
+	err         error
+}
 
 // streamLineMsg is sent by goroutines streaming agent output line by line.
 type streamLineMsg struct {
 	agent string
 	line  string
-	done  bool // true = agent finished
 }
 
 // phaseResultMsg carries the final result of a phase operation.
+// project, when non-nil, replaces the model's project (goroutines never mutate it directly).
 type phaseResultMsg struct {
-	phase  string
-	result string
-	err    error
+	phase   string
+	err     error
+	project *state.ProjectState
 }
 
 // approvalMsg requests a y/n response from the user.
 type approvalMsg struct {
 	question string
-	onYes    func() // called when user types y
-	onNo     func() // called when user types n
+	onYes    func() // run in a goroutine when user types y
+	onNo     func() // run in a goroutine when user types n
 }
 
 // freeInputMsg requests freeform text from the user.
 type freeInputMsg struct {
 	prompt   string
-	callback func(text string)
+	callback func(text string) // run in a goroutine
 }
 
-// chatDoneMsg signals that a judge chat goroutine finished.
+// chatDoneMsg signals that a judge chat finished.
 type chatDoneMsg struct{ err error }
+
+// manifestChangedMsg tells the model to reload its cached task manifest.
+type manifestChangedMsg struct{}
 
 // agentActivityMsg updates the live activity panel for a single agent.
 // status: "running" | "done" | "error" | "clear" (clear resets all activity)

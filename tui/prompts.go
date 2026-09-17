@@ -67,7 +67,8 @@ func buildJudgePlanPrompt(task string, plans []agentPlan, feedback string) strin
 	return sb.String()
 }
 
-func buildDividePrompt(s *state.ProjectState, cfg *config.Config) string {
+// buildDividePrompt offers only agents that are actually available (in the registry).
+func buildDividePrompt(s *state.ProjectState, cfg *config.Config, available []string) string {
 	var sb strings.Builder
 	sb.WriteString("Break this plan into concrete tasks. Return ONLY a JSON array, no prose, no markdown fences.\n\n")
 	sb.WriteString("PROJECT: ")
@@ -75,31 +76,13 @@ func buildDividePrompt(s *state.ProjectState, cfg *config.Config) string {
 	sb.WriteString("\n\nPLAN:\n")
 	sb.WriteString(s.ApprovedPlan)
 	sb.WriteString("\n\nAVAILABLE AGENTS:\n")
-	for name, ac := range cfg.Agents {
-		if ac.Enabled {
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", name, strings.Join(ac.Strengths, ", ")))
-		}
+	for _, name := range available {
+		ac := cfg.Agents[name]
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", name, strings.Join(ac.Strengths, ", ")))
 	}
 	sb.WriteString("\nFormat:\n")
 	sb.WriteString(`[{"id":"task-001","title":"short title","description":"detailed description","assigned_to":"agent-name","dependencies":[]}]`)
-	sb.WriteString("\n\nRules: no cycles, dependencies must reference existing IDs only, tasks must be concrete and completable.")
-	return sb.String()
-}
-
-func buildWorkPrompt(task *state.Task, basePrompt, depOutputs, memCtx string) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Task [%s]: %s\n\n", task.ID, task.Title))
-	sb.WriteString("DESCRIPTION:\n")
-	sb.WriteString(basePrompt)
-	if depOutputs != "" {
-		sb.WriteString("\n\nPREREQUISITE TASK OUTPUTS:\n")
-		sb.WriteString(depOutputs)
-	}
-	if memCtx != "" {
-		sb.WriteString("\n\nMEMORY CONTEXT:\n")
-		sb.WriteString(memCtx)
-	}
-	sb.WriteString("\n\nComplete this task fully. If you need a human decision, output '<<AROS_HUMAN>>' on its own line followed by your question, then stop.")
+	sb.WriteString("\n\nRules: assigned_to must be exactly one of the agent names above; ids unique; no cycles; dependencies must reference existing IDs only; tasks must be concrete and completable.")
 	return sb.String()
 }
 

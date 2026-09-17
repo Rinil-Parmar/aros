@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,6 +50,7 @@ type Model struct {
 	onNo       func()
 	onFreeText func(string)
 
+	cfgFile string
 	cfg     *config.Config
 	reg     agent.Registry
 	mem     *memory.SecondMem
@@ -57,11 +59,18 @@ type Model struct {
 	cwd     string
 	busy    bool
 
+	// phaseCancel aborts the running phase's agent subprocesses (/phase --force etc).
+	phaseCancel context.CancelFunc
+
+	// manifest is a cached copy of the active session's task list for the
+	// right panel — reloaded on manifestChangedMsg, never read from disk in View().
+	manifest *state.TaskManifest
+
 	activity         map[string]*agentStatus
 	approvalQuestion string
 	sessionID        string
 	sessionName      string
-	chatInProgress   bool // true while judge chat goroutine is running
+	chatInProgress   bool // true while a judge chat is running
 
 	// layout cache — computed by recalcLayout, used by view.go
 	leftW  int
@@ -77,43 +86,40 @@ var knownModels = map[string][]string{
 		"haiku",
 		"sonnet",
 		"opus",
-		"claude-haiku-4-5-20251001",
-		"claude-sonnet-4-6",
-		"claude-opus-4-7",
 	},
 	"opencode": {
-		"openai/gpt-4o-mini",
-		"openai/gpt-4o",
+		"openai/gpt-5.4-mini",
+		"openai/gpt-5.4",
 		"anthropic/claude-sonnet-4-5",
 		"anthropic/claude-haiku-4-5",
-		"google/gemini-2.0-flash",
-		"google/gemini-pro",
-		"deepseek/deepseek-chat",
+		"google/gemini-2.5-flash",
+		"google/gemini-2.5-pro",
+		"(run `opencode models` for the full list)",
 	},
 	"copilot": {
-		"gpt-4.1",
-		"gpt-4.1-mini",
-		"gpt-4o",
-		"gpt-4o-mini",
-		"o3",
-		"o4-mini",
-		"gemini-2.0-flash",
+		"auto",
+		"gpt-5.4",
+		"claude-sonnet-4.5",
+		"(run `copilot --help` for the full list)",
 	},
 }
 
-var knownDenseLevels = []string{"", "lite", "full", "ultra"}
+var knownDenseLevels = []string{"off", "lite", "full", "ultra"}
 
 var program *tea.Program
 
 func SetProgram(p *tea.Program) { program = p }
 
+// send delivers a message to the event loop. Only call from goroutines —
+// never from inside Update (see messages.go).
 func send(msg tea.Msg) {
 	if program != nil {
 		program.Send(msg)
 	}
 }
 
-func New() *Model {
+// New builds the TUI model. cfgFile overrides the global config path ("" = default).
+func New(cfgFile string) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorBrand)
@@ -146,46 +152,50 @@ func New() *Model {
 	vp.MouseWheelEnabled = true
 
 	return &Model{
+		cfgFile:  cfgFile,
 		spinner:  sp,
 		textarea: ta,
 		viewport: vp,
 		mode:     modeText,
+		activity: make(map[string]*agentStatus),
 	}
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, textarea.Blink, m.bootstrap())
+	return tea.Batch(m.spinner.Tick, textarea.Blink, bootstrap(m.cfgFile))
 }
 
-func (m *Model) bootstrap() tea.Cmd {
+// bootstrap loads config, agents and project state off the event loop and
+// hands everything back as one message (it never touches the Model).
+func bootstrap(cfgFile string) tea.Cmd {
 	return func() tea.Msg {
 		cwd, _ := os.Getwd()
-		m.cwd = cwd
-		m.arosDir = filepath.Join(cwd, ".aros")
+		out := bootstrapMsg{cwd: cwd, arosDir: filepath.Join(cwd, ".aros")}
 
-		cfg, err := config.Load("")
+		cfg, err := config.Load(cfgFile)
 		if err != nil {
-			return phaseResultMsg{err: fmt.Errorf("config: %w", err)}
+			out.err = fmt.Errorf("config: %w", err)
+			return out
 		}
-		m.cfg = cfg
-		m.mem = memory.New(cfg.SecondMem.Binary, cfg.SecondMem.Enabled)
+		out.cfg = cfg
+		out.mem = memory.New(cfg.SecondMem.Binary, cfg.SecondMem.Enabled)
 
-		reg, regErr := agent.BuildRegistry(cfg, cwd)
+		reg, warnings, regErr := agent.BuildRegistry(cfg, cwd)
+		out.warnings = warnings
 		if regErr != nil {
-			m.addSystem("warning: " + regErr.Error())
+			out.warnings = append(out.warnings, regErr.Error())
 		} else {
-			m.reg = reg
+			out.reg = reg
 		}
 
-		if s, err := state.LoadState(m.arosDir); err == nil {
-			m.project = s
-			if meta, err := state.ActiveSession(m.arosDir); err == nil {
-				m.sessionID = meta.ID
-				m.sessionName = meta.Name
+		if s, err := state.LoadState(out.arosDir); err == nil {
+			out.project = s
+			if meta, err := state.ActiveSession(out.arosDir); err == nil {
+				out.sessionID = meta.ID
+				out.sessionName = meta.Name
 			}
 		}
-
-		return phaseResultMsg{phase: "bootstrap"}
+		return out
 	}
 }
 
@@ -198,8 +208,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		key := msg.String()
 
 		// Always-active quit
-		switch key {
-		case "ctrl+c":
+		if key == "ctrl+c" {
+			m.cancelPhase()
 			m.quitting = true
 			return m, tea.Quit
 		}
@@ -235,12 +245,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Approval mode accepts immediate single-key responses (no Enter required).
-		if m.mode == modeApproval {
+		// Approval mode accepts a bare y/n keypress (no Enter) when nothing is typed yet.
+		if m.mode == modeApproval && m.textarea.Value() == "" {
 			switch strings.ToLower(key) {
 			case "y", "n":
-				cmds = append(cmds, m.handleInput(strings.ToLower(key)))
-				return m, tea.Batch(cmds...)
+				return m, m.handleInput(strings.ToLower(key))
 			}
 		}
 
@@ -278,21 +287,45 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
 
-	case phaseResultMsg:
-		m.busy = false
+	case bootstrapMsg:
+		m.cwd = msg.cwd
+		m.arosDir = msg.arosDir
+		m.cfg = msg.cfg
+		m.reg = msg.reg
+		m.mem = msg.mem
+		m.project = msg.project
+		m.sessionID = msg.sessionID
+		m.sessionName = msg.sessionName
+		m.reloadManifest()
+		m.showWelcome()
 		if msg.err != nil {
 			m.addError(msg.err.Error())
+			m.addSystem("Fix the config (aros config show) and restart.")
+		}
+		for _, w := range msg.warnings {
+			m.addSystem("warning: " + w)
+		}
+
+	case phaseResultMsg:
+		if msg.project != nil {
+			m.project = msg.project
+			m.reloadManifest()
+		}
+		if msg.phase == "work_started" {
+			break // phase still running
+		}
+		m.busy = false
+		m.phaseCancel = nil
+		if msg.err != nil {
+			m.addError(msg.err.Error())
+			m.clearActivity()
 			m.setMode(modeText, "")
 		} else {
-			cmds = append(cmds, m.handlePhaseResult(msg))
+			m.handlePhaseResult(msg)
 		}
 
 	case streamLineMsg:
-		if msg.done {
-			m.busy = false
-		} else {
-			m.appendStream(msg.agent, msg.line)
-		}
+		m.appendStream(msg.agent, msg.line)
 
 	case approvalMsg:
 		m.onYes = msg.onYes
@@ -312,33 +345,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.addError(msg.err.Error())
 		}
+		m.clearActivity()
 
-	case agentActivityMsg:
-		if m.activity == nil {
-			m.activity = make(map[string]*agentStatus)
-		}
-		if msg.status == "clear" {
-			m.activity = make(map[string]*agentStatus)
-			m.recalcLayout()
+	case manifestChangedMsg:
+		m.reloadManifest()
+
+	case planRequestMsg:
+		m.busy = false // set by the free-text handoff
+		m.setMode(modeText, "")
+		if m.rejectIfBusy() || !m.ready() {
 			break
 		}
-		prev, exists := m.activity[msg.agent]
-		if !exists {
-			prev = &agentStatus{}
-			m.activity[msg.agent] = prev
+		go runPlan(m.newPhaseRun(), msg.task)
+
+	case sessionNewMsg:
+		m.busy = false
+		m.setMode(modeText, "")
+		if err := m.createSession(msg.name); err != nil {
+			m.addError(err.Error())
 		}
-		if msg.model != "" {
-			prev.model = msg.model
-		}
-		if msg.status != "" {
-			prev.status = msg.status
-		}
-		if msg.line != "" {
-			prev.line = truncate(msg.line, 50)
-		}
-		if !exists {
-			m.recalcLayout()
-		}
+
+	case sessionLoadedMsg:
+		m.project = msg.project
+		m.sessionID = msg.sessionID
+		m.sessionName = msg.sessionName
+		m.reloadManifest()
+		m.handlePhaseResult(phaseResultMsg{phase: "init"})
+
+	case agentActivityMsg:
+		m.setActivity(msg)
 	}
 
 	// Track textarea height before update to detect growth/shrink
@@ -354,8 +389,104 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// ── Activity panel (Update-side; goroutines use send(agentActivityMsg)) ────────
+
+func (m *Model) setActivity(msg agentActivityMsg) {
+	if msg.status == "clear" {
+		m.clearActivity()
+		return
+	}
+	prev, exists := m.activity[msg.agent]
+	if !exists {
+		prev = &agentStatus{}
+		m.activity[msg.agent] = prev
+	}
+	if msg.model != "" {
+		prev.model = msg.model
+	}
+	if msg.status != "" {
+		prev.status = msg.status
+	}
+	if msg.line != "" {
+		prev.line = truncate(msg.line, 50)
+	}
+	if !exists {
+		m.recalcLayout()
+	}
+}
+
+func (m *Model) clearActivity() {
+	m.activity = make(map[string]*agentStatus)
+	m.recalcLayout()
+}
+
+// reloadManifest refreshes the cached task list from disk.
+func (m *Model) reloadManifest() {
+	m.manifest = nil
+	if m.project == nil || m.arosDir == "" {
+		return
+	}
+	if mf, err := state.LoadManifest(m.arosDir); err == nil {
+		m.manifest = mf
+	}
+}
+
+// ready reports whether config/agents loaded; otherwise explains why not.
+func (m *Model) ready() bool {
+	if m.cfg == nil {
+		m.addError("configuration failed to load — fix ~/.aros/config.toml and restart")
+		return false
+	}
+	if len(m.reg) == 0 {
+		m.addError("no agents available — install claude, opencode or copilot and ensure they are on PATH")
+		return false
+	}
+	return true
+}
+
+// newPhaseRun snapshots everything a phase goroutine needs and marks the model busy.
+func (m *Model) newPhaseRun() phaseRun {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.phaseCancel = cancel
+	m.busy = true
+	pr := phaseRun{ctx: ctx, cfg: m.cfg, reg: m.reg, mem: m.mem, arosDir: m.arosDir}
+	if m.project != nil {
+		pr.project = *m.project
+	}
+	return pr
+}
+
+// cancelPhase aborts the running phase (kills agent subprocesses) and unlocks input.
+func (m *Model) cancelPhase() {
+	if m.phaseCancel != nil {
+		m.phaseCancel()
+		m.phaseCancel = nil
+	}
+	m.busy = false
+	m.onYes, m.onNo, m.onFreeText = nil, nil, nil
+	m.approvalQuestion = ""
+	m.clearActivity()
+	m.setMode(modeText, "")
+}
+
+func (m *Model) isBusy() bool { return m.busy || m.chatInProgress }
+
+func (m *Model) rejectIfBusy() bool {
+	if m.isBusy() {
+		m.addSystem("Busy — wait for the current operation to finish, or use /phase <phase> --force to abort it.")
+		return true
+	}
+	return false
+}
+
 func (m *Model) handleInput(text string) tea.Cmd {
 	m.addHuman(text)
+
+	// Slash commands always work — /phase --force must be able to abort a
+	// phase that is waiting on an approval or a question.
+	if strings.HasPrefix(text, "/") {
+		return m.handleSlash(text)
+	}
 
 	switch m.mode {
 	case modeApproval:
@@ -366,29 +497,26 @@ func (m *Model) handleInput(text string) tea.Cmd {
 			m.approvalQuestion = ""
 			m.onYes = nil
 			m.onNo = nil
-			// Unlock input immediately — never hold the UI hostage waiting for a goroutine
-			m.busy = false
-			m.setMode(modeText, "")
+			m.setMode(modeIdle, "")
 			m.recalcLayout()
+			// Callbacks may run agents or call send(); they must run off the event loop.
 			if lower == "y" || lower == "yes" {
 				if cbYes != nil {
 					go cbYes()
 				}
-			} else {
-				if cbNo != nil {
-					go cbNo()
-				}
+			} else if cbNo != nil {
+				go cbNo()
 			}
 			return nil
 		}
-		m.startChat(text)
+		m.addSystem("Please answer y or n.")
 		return nil
 
 	case modeText, modeIdle:
 		if m.onFreeText != nil {
 			cb := m.onFreeText
 			m.onFreeText = nil
-			m.busy = true // set in the Update loop (not in goroutine) — no data race
+			m.busy = true
 			m.setMode(modeIdle, "")
 			go cb(text)
 			return nil
@@ -399,48 +527,49 @@ func (m *Model) handleInput(text string) tea.Cmd {
 }
 
 func (m *Model) dispatch(text string) tea.Cmd {
-	if strings.HasPrefix(text, "/") {
-		return m.handleSlash(text)
-	}
-
 	if m.project == nil {
 		return m.initProject(text)
 	}
 
 	lower := strings.ToLower(text)
-	if m.busy {
-		m.addSystem("Phase is running — wait for it to finish, or use /phase --force to abort.")
-		return nil
-	}
 	switch {
 	case lower == "help":
 		m.showHelp()
 	case lower == "status":
 		m.showStatus()
 	case lower == "divide":
-		m.busy = true
-		go m.runDivide()
+		if m.rejectIfBusy() || !m.ready() {
+			return nil
+		}
+		go runDivide(m.newPhaseRun())
 	case lower == "work":
-		m.busy = true
-		go m.runWork()
-	case strings.HasPrefix(lower, "plan"):
+		if m.rejectIfBusy() || !m.ready() {
+			return nil
+		}
+		go runWork(m.newPhaseRun())
+	case lower == "plan" || strings.HasPrefix(lower, "plan "):
+		if m.rejectIfBusy() || !m.ready() {
+			return nil
+		}
 		task := strings.TrimSpace(text[len("plan"):])
 		if task == "" {
 			m.onFreeText = func(t string) {
-				m.busy = true
-				go m.runPlan(t)
+				// runs in a goroutine; hand off to a fresh phase run via the event loop
+				send(planRequestMsg{task: t})
 			}
 			m.addSystem("What do you want to build?")
 			m.setMode(modeText, "task")
 		} else {
-			m.busy = true
-			go m.runPlan(task)
+			go runPlan(m.newPhaseRun(), task)
 		}
 	default:
-		m.startChat(text)
+		return m.startChat(text)
 	}
 	return nil
 }
+
+// planRequestMsg starts a plan for a task entered via the free-text prompt.
+type planRequestMsg struct{ task string }
 
 func (m *Model) handleSlash(text string) tea.Cmd {
 	parts := strings.Fields(text)
@@ -451,6 +580,7 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		m.showHelp()
 
 	case "/quit", "/exit":
+		m.cancelPhase()
 		m.quitting = true
 		return tea.Quit
 
@@ -465,21 +595,23 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		m.refreshViewport()
 
 	case "/model":
+		if m.cfg == nil {
+			m.addError("configuration not loaded")
+			return nil
+		}
 		if len(parts) == 1 {
 			m.addSystem("Usage: /model <agent> <model>")
 			m.addSystem("")
-			for _, agentName := range []string{"claude", "opencode", "copilot"} {
-				if models, ok := knownModels[agentName]; ok {
-					m.addSystem(fmt.Sprintf("  %s:", agentName))
-					for _, mdl := range models {
-						m.addSystem(fmt.Sprintf("    %s", mdl))
-					}
+			for _, agentName := range m.agentNames() {
+				m.addSystem(fmt.Sprintf("  %s: %s", agentName, m.cfg.Agents[agentName].Model))
+				for _, mdl := range knownModels[agentName] {
+					m.addSystem("    " + mdl)
 				}
 			}
 			return nil
 		}
+		agentName := strings.ToLower(parts[1])
 		if len(parts) == 2 {
-			agentName := parts[1]
 			if models, ok := knownModels[agentName]; ok {
 				m.addSystem(fmt.Sprintf("Models for %s:", agentName))
 				for _, mdl := range models {
@@ -491,26 +623,31 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 			}
 			return nil
 		}
-		agentName, modelName := parts[1], strings.Join(parts[2:], " ")
+		if m.rejectIfBusy() {
+			return nil
+		}
+		modelName := strings.Join(parts[2:], " ")
 		if err := m.setAgentModel(agentName, modelName); err != nil {
 			m.addError(err.Error())
 			return nil
 		}
-		m.addSuccess(fmt.Sprintf("Set %s model → %s", agentName, modelName))
+		m.addSuccess(fmt.Sprintf("Set %s model → %s  (this session only; persist with: aros config set agents.%s.model %s)", agentName, modelName, agentName, modelName))
 
 	case "/dense":
+		if m.cfg == nil {
+			m.addError("configuration not loaded")
+			return nil
+		}
 		if len(parts) == 1 {
-			m.addSystem("Usage: /dense <agent> [level]")
+			m.addSystem("Usage: /dense <agent> <level>")
 			m.addSystem("Levels: " + strings.Join(knownDenseLevels, ", "))
 			m.addSystem("")
-			for _, agentName := range []string{"claude", "opencode", "copilot"} {
-				if ac, ok := m.cfg.Agents[agentName]; ok {
-					level := ac.Dense
-					if level == "" {
-						level = "(off)"
-					}
-					m.addSystem(fmt.Sprintf("  %s: %s", agentName, level))
+			for _, agentName := range m.agentNames() {
+				level := m.cfg.Agents[agentName].Dense
+				if level == "" {
+					level = "off"
 				}
+				m.addSystem(fmt.Sprintf("  %s: %s", agentName, level))
 			}
 			return nil
 		}
@@ -519,27 +656,34 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 			m.addSystem("Levels: " + strings.Join(knownDenseLevels, ", "))
 			return nil
 		}
-		agentName, level := parts[1], parts[2]
+		if m.rejectIfBusy() {
+			return nil
+		}
+		agentName, level := strings.ToLower(parts[1]), strings.ToLower(parts[2])
 		if err := m.setAgentDense(agentName, level); err != nil {
 			m.addError(err.Error())
 			return nil
 		}
-		if level == "" {
-			m.addSuccess(fmt.Sprintf("%s dense mode → off", agentName))
-		} else {
-			m.addSuccess(fmt.Sprintf("%s dense mode → %s", agentName, level))
-		}
+		m.addSuccess(fmt.Sprintf("%s dense mode → %s", agentName, level))
 
 	case "/judge":
+		if m.cfg == nil {
+			m.addError("configuration not loaded")
+			return nil
+		}
 		if len(parts) < 2 {
 			m.addError("Usage: /judge <agent>   e.g. /judge claude")
 			return nil
 		}
-		if err := m.setJudge(parts[1]); err != nil {
+		if m.rejectIfBusy() {
+			return nil
+		}
+		name := strings.ToLower(parts[1])
+		if err := m.setJudge(name); err != nil {
 			m.addError(err.Error())
 			return nil
 		}
-		m.addSuccess("Judge agent → " + parts[1])
+		m.addSuccess("Judge agent → " + name)
 
 	case "/session":
 		if len(parts) == 1 {
@@ -547,28 +691,24 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 			return nil
 		}
 		sub := strings.ToLower(parts[1])
-		switch sub {
-		case "list":
+		if sub == "list" {
 			m.showSessions()
 			return nil
+		}
+		force := hasForceFlag(parts)
+		if m.isBusy() && !force {
+			m.addError("Cannot change session while a command is running. Use --force to abort it.")
+			return nil
+		}
+		if m.isBusy() && force {
+			m.addSystem("Aborting the running operation — tasks in flight will be marked blocked.")
+			m.cancelPhase()
+		}
+		switch sub {
 		case "new":
-			force := hasForceFlag(parts)
-			if m.busy && !force {
-				m.addError("Cannot change session while a command is running. Use --force to override.")
-				return nil
-			}
-			if m.busy && force {
-				m.addSystem("Warning: switching sessions while work is running may leave tasks incomplete.")
-				m.busy = false
-				send(agentActivityMsg{status: "clear"})
-			}
 			name := strings.Join(stripFlags(parts[2:]), " ")
 			if name == "" {
-				m.onFreeText = func(t string) {
-					if err := m.createSession(t); err != nil {
-						m.addError(err.Error())
-					}
-				}
+				m.onFreeText = func(t string) { send(sessionNewMsg{name: t}) }
 				m.addSystem("Session name?")
 				m.setMode(modeText, "session name")
 				return nil
@@ -576,18 +716,7 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 			if err := m.createSession(name); err != nil {
 				m.addError(err.Error())
 			}
-			return nil
 		case "use":
-			force := hasForceFlag(parts)
-			if m.busy && !force {
-				m.addError("Cannot change session while a command is running. Use --force to override.")
-				return nil
-			}
-			if m.busy && force {
-				m.addSystem("Warning: switching sessions while work is running may leave tasks incomplete.")
-				m.busy = false
-				send(agentActivityMsg{status: "clear"})
-			}
 			id := firstArg(parts[2:])
 			if id == "" {
 				m.addError("Usage: /session use <id>")
@@ -596,18 +725,7 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 			if err := m.useSession(id); err != nil {
 				m.addError(err.Error())
 			}
-			return nil
 		case "rm":
-			force := hasForceFlag(parts)
-			if m.busy && !force {
-				m.addError("Cannot change session while a command is running. Use --force to override.")
-				return nil
-			}
-			if m.busy && force {
-				m.addSystem("Warning: switching sessions while work is running may leave tasks incomplete.")
-				m.busy = false
-				send(agentActivityMsg{status: "clear"})
-			}
 			id := firstArg(parts[2:])
 			if id == "" {
 				m.addError("Usage: /session rm <id> [--force]")
@@ -616,11 +734,10 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 			if err := m.removeSession(id, force); err != nil {
 				m.addError(err.Error())
 			}
-			return nil
 		default:
 			m.addError("Usage: /session <new|list|use|rm> [args]")
-			return nil
 		}
+		return nil
 
 	case "/phase":
 		if len(parts) < 2 {
@@ -628,14 +745,13 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 			return nil
 		}
 		force := hasForceFlag(parts)
-		if m.busy && !force {
-			m.addError("Cannot change phase while a command is running. Use --force to override.")
+		if m.isBusy() && !force {
+			m.addError("Cannot change phase while a command is running. Use --force to abort it.")
 			return nil
 		}
-		if m.busy && force {
-			m.addSystem("Warning: changing phase while work is running may leave tasks incomplete.")
-			m.busy = false
-			send(agentActivityMsg{status: "clear"})
+		if m.isBusy() && force {
+			m.addSystem("Aborting the running operation — tasks in flight will be marked blocked.")
+			m.cancelPhase()
 		}
 		if err := m.setPhase(parts[1]); err != nil {
 			m.addError(err.Error())
@@ -648,33 +764,35 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 	return nil
 }
 
-func (m *Model) handlePhaseResult(msg phaseResultMsg) tea.Cmd {
+// sessionNewMsg creates a session named via the free-text prompt.
+type sessionNewMsg struct{ name string }
+
+func (m *Model) handlePhaseResult(msg phaseResultMsg) {
 	switch msg.phase {
-	case "bootstrap":
-		return m.showWelcome()
 	case "init":
 		m.addSuccess("Project initialized: " + m.project.ProjectName)
 		m.showHelp()
 	case "plan_done":
 		m.addSuccess("Plan approved.")
 		m.addSystem("  → type: divide    (break plan into agent tasks)")
-		send(agentActivityMsg{status: "clear"})
+		m.clearActivity()
 	case "divide_done":
 		m.addSuccess("Tasks assigned.")
 		m.addSystem("  → type: work    (execute all tasks)")
-		send(agentActivityMsg{status: "clear"})
+		m.clearActivity()
 	case "work_done":
 		m.addSuccess("All tasks complete!")
 		m.addSystem("  → status                    review results")
 		m.addSystem("  → /session new <name>       start a new project")
 		m.addSystem("  → /phase init               reset this session")
-		send(agentActivityMsg{status: "clear"})
+		m.clearActivity()
+	default:
+		m.clearActivity()
 	}
 	m.setMode(modeText, "")
-	return nil
 }
 
-func (m *Model) showWelcome() tea.Cmd {
+func (m *Model) showWelcome() {
 	w := m.leftW
 	if w == 0 {
 		w = m.width
@@ -700,12 +818,11 @@ func (m *Model) showWelcome() tea.Cmd {
 		m.showAgents()
 		m.showHelp()
 		m.setMode(modeText, "")
-		return nil
+		return
 	}
 
 	m.addSystem("No project found here. Enter a project name to start:")
 	m.setMode(modeText, "project name")
-	return nil
 }
 
 func (m *Model) showHelp() {
@@ -713,16 +830,16 @@ func (m *Model) showHelp() {
 	for _, l := range []string{
 		"  plan <task>      generate multi-agent plan",
 		"  divide           break plan into tasks",
-		"  work             execute tasks",
+		"  work             execute tasks (re-run to retry blocked tasks)",
 		"  status           current state and tasks",
 		"",
 		"Slash commands:",
-		"  /model <agent> <model>     change model for an agent",
-		"  /dense <agent> [level]     set dense output (lite|full|ultra)",
+		"  /model <agent> <model>     change model for an agent (this session)",
+		"  /dense <agent> <level>     set dense output (off|lite|full|ultra)",
 		"  /judge <agent>             change which agent is the judge",
 		"  /agents                    show all configured agents",
 		"  /session <new|list|use|rm>  manage sessions",
-		"  /phase <phase> [--force]    set phase (init|plan|divide|work|done)",
+		"  /phase <phase> [--force]    set phase (init|plan|divide|work|done); --force aborts a running phase",
 		"  /clear                     clear chat history",
 		"  /help, /quit",
 		"",
@@ -741,22 +858,15 @@ func (m *Model) cyclePhase() {
 		m.addSystem("No project loaded.")
 		return
 	}
-	if m.busy {
+	if m.isBusy() {
 		m.addSystem("Cannot change phase while a command is running.")
 		return
 	}
 
-	order := []state.Phase{
-		state.PhaseInit,
-		state.PhasePlan,
-		state.PhaseDivide,
-		state.PhaseWork,
-		state.PhaseDone,
-	}
-	next := order[0]
-	for i, p := range order {
+	next := state.KnownPhases[0]
+	for i, p := range state.KnownPhases {
 		if m.project.Phase == p {
-			next = order[(i+1)%len(order)]
+			next = state.KnownPhases[(i+1)%len(state.KnownPhases)]
 			break
 		}
 	}
@@ -769,18 +879,39 @@ func (m *Model) cyclePhase() {
 	m.addSuccess("Phase changed → " + string(next))
 }
 
+// agentNames returns configured agent names in sorted order.
+func (m *Model) agentNames() []string {
+	if m.cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(m.cfg.Agents))
+	for n := range m.cfg.Agents {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (m *Model) showAgents() {
 	if m.cfg == nil {
 		return
 	}
 	m.addSystem(fmt.Sprintf("Judge: %s", m.cfg.Judge.Agent))
 	m.addSystem("Agents:")
-	for name, ac := range m.cfg.Agents {
+	for _, name := range m.agentNames() {
+		ac := m.cfg.Agents[name]
 		status := "off"
 		if ac.Enabled {
 			status = "on"
+			if _, ok := m.reg[name]; !ok {
+				status = "missing"
+			}
 		}
-		m.addSystem(fmt.Sprintf("  %-12s [%s]  model: %s", name, status, ac.Model))
+		dense := ac.Dense
+		if dense == "" {
+			dense = "off"
+		}
+		m.addSystem(fmt.Sprintf("  %-12s [%s]  model: %s  dense: %s", name, status, ac.Model, dense))
 	}
 }
 
@@ -805,67 +936,76 @@ func (m *Model) showSessions() {
 	}
 }
 
-func (m *Model) startChat(text string) {
-	if m.chatInProgress {
-		m.addSystem("Judge is thinking — please wait.")
-		return
+// startChat asks the judge a free-form question with project context.
+// All work happens inside the returned tea.Cmd (its own goroutine).
+func (m *Model) startChat(text string) tea.Cmd {
+	if m.rejectIfBusy() || !m.ready() {
+		return nil
 	}
 
-	judge, err := m.reg.Judge(m.cfg.Judge.Agent)
 	judgeName := m.cfg.Judge.Agent
+	judge, err := m.reg.Judge(judgeName)
 	if err != nil {
-		// fall back to any available agent
-		for name, a := range m.reg {
-			judge = a
-			judgeName = name
-			break
-		}
-		if judge == nil {
-			m.addError("no agent available for chat")
-			return
-		}
+		// Chat is best-effort: any available agent will do, but say which.
+		names := m.reg.Names()
+		judgeName = names[0]
+		judge = m.reg[judgeName]
+		m.addSystem(fmt.Sprintf("judge %q unavailable — chatting with %s instead", m.cfg.Judge.Agent, judgeName))
 	}
 
 	judgeCfg := m.cfg.Agents[judgeName]
 	m.chatInProgress = true
-	send(agentActivityMsg{agent: judgeName, model: judgeCfg.Model, status: "running", line: "thinking..."})
+	m.setActivity(agentActivityMsg{agent: judgeName, model: judgeCfg.Model, status: "running", line: "thinking..."})
 
-	question := text
-	project := m.project // capture snapshot for goroutine
-	arosDir := m.arosDir
+	// Snapshot for the goroutine.
+	var project *state.ProjectState
+	if m.project != nil {
+		p := *m.project
+		project = &p
+	}
+	var manifest *state.TaskManifest
+	if m.manifest != nil {
+		mf := *m.manifest
+		manifest = &mf
+	}
+	mem := m.mem
+	timeout := time.Duration(m.cfg.Work.AgentTimeoutSeconds) * time.Second
 
-	go func() {
-		memCtx := m.mem.Ask(context.Background(), question)
-		var manifest *state.TaskManifest
-		if project != nil {
-			if mft, err := state.LoadManifest(arosDir); err == nil {
-				manifest = mft
-			}
-		}
-		prompt := withDense(buildChatPrompt(question, project, manifest, memCtx), judgeCfg)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		result, err := judge.Run(ctx, prompt)
-		if err != nil {
-			send(agentActivityMsg{agent: judgeName, status: "error", line: err.Error()})
-			send(chatDoneMsg{err: fmt.Errorf("chat error: %w", err)})
-			return
+
+		memCtx := mem.Ask(ctx, text)
+		prompt := withDense(buildChatPrompt(text, project, manifest, memCtx), judgeCfg)
+
+		var result agent.AgentResult
+		var runErr error
+		if ca, ok := judge.(agent.ChatAgent); ok {
+			result, runErr = ca.Chat(ctx, prompt)
+		} else {
+			result, runErr = judge.Run(ctx, prompt)
 		}
-		for _, line := range strings.Split(result.Output, "\n") {
-			if strings.TrimSpace(line) != "" {
-				send(streamLineMsg{agent: judgeName, line: line})
-				send(agentActivityMsg{agent: judgeName, line: line})
-			}
+		if runErr != nil {
+			send(agentActivityMsg{agent: judgeName, status: "error", line: runErr.Error()})
+			return chatDoneMsg{err: fmt.Errorf("chat: %w", runErr)}
+		}
+		if strings.TrimSpace(result.Output) == "" {
+			send(streamLineMsg{agent: judgeName, line: "(no response)"})
+		} else {
+			streamOutput(judgeName, result.Output)
 		}
 		send(agentActivityMsg{agent: judgeName, status: "done", line: "done"})
-		send(chatDoneMsg{})
-	}()
+		return chatDoneMsg{}
+	}
 }
 
 func (m *Model) createSession(name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("session name cannot be empty")
+	}
+	if err := os.MkdirAll(m.arosDir, 0755); err != nil {
+		return err
 	}
 	meta, s, err := state.CreateSession(m.arosDir, name)
 	if err != nil {
@@ -877,8 +1017,8 @@ func (m *Model) createSession(name string) error {
 	m.project = s
 	m.sessionID = meta.ID
 	m.sessionName = meta.Name
+	m.reloadManifest()
 	m.addSuccess(fmt.Sprintf("Session created → %s (%s)", meta.Name, meta.ID))
-	m.busy = false
 	return nil
 }
 
@@ -899,6 +1039,7 @@ func (m *Model) useSession(id string) error {
 		m.sessionName = ""
 	}
 	m.project = s
+	m.reloadManifest()
 	m.addSuccess(fmt.Sprintf("Active session → %s", id))
 	return nil
 }
@@ -933,6 +1074,7 @@ func (m *Model) removeSession(id string, force bool) error {
 			m.sessionID = ""
 			m.sessionName = ""
 		}
+		m.reloadManifest()
 	}
 	m.addSuccess(fmt.Sprintf("Session removed → %s", id))
 	return nil
@@ -1001,24 +1143,27 @@ func (m *Model) showStatus() {
 	if m.project.Task != "" {
 		m.addSystem("Task: " + m.project.Task)
 	}
-	manifest, err := state.LoadManifest(m.arosDir)
-	if err != nil || len(manifest.Tasks) == 0 {
+	m.reloadManifest()
+	if m.manifest == nil || len(m.manifest.Tasks) == 0 {
 		return
 	}
 	m.addSystem(fmt.Sprintf("%-12s %-28s %-12s %s", "ID", "Title", "Agent", "Status"))
 	m.addSystem(strings.Repeat("─", 65))
-	for _, t := range manifest.Tasks {
+	for _, t := range m.manifest.Tasks {
 		icon := "○"
-		if t.Status == state.TaskDone {
+		switch t.Status {
+		case state.TaskDone:
 			icon = "✓"
-		} else if t.Status == state.TaskInProgress {
+		case state.TaskInProgress:
 			icon = "►"
+		case state.TaskBlocked:
+			icon = "✗"
 		}
-		title := t.Title
-		if len(title) > 27 {
-			title = title[:24] + "..."
+		status := string(t.Status)
+		if t.BlockReason != "" {
+			status += "  " + truncate(t.BlockReason, 60)
 		}
-		m.addSystem(fmt.Sprintf("%s %-11s %-28s %-12s %s", icon, t.ID, title, t.AssignedTo, t.Status))
+		m.addSystem(fmt.Sprintf("%s %-11s %-28s %-12s %s", icon, t.ID, truncate(t.Title, 27), t.AssignedTo, status))
 	}
 }
 
@@ -1140,31 +1285,36 @@ func (m *Model) setMode(mode inputMode, prompt string) {
 	m.prompt = prompt
 }
 
+// initProject creates the first session off the event loop and reports back.
 func (m *Model) initProject(name string) tea.Cmd {
+	arosDir := m.arosDir
 	return func() tea.Msg {
-		if err := os.MkdirAll(m.arosDir, 0755); err != nil {
+		if err := os.MkdirAll(arosDir, 0755); err != nil {
 			return phaseResultMsg{err: err}
 		}
-		meta, s, err := state.CreateSession(m.arosDir, name)
+		meta, s, err := state.CreateSession(arosDir, name)
 		if err != nil {
 			return phaseResultMsg{err: err}
 		}
-		if err := state.SetActiveSession(m.arosDir, meta.ID); err != nil {
+		if err := state.SetActiveSession(arosDir, meta.ID); err != nil {
 			return phaseResultMsg{err: err}
 		}
-		_ = os.WriteFile(filepath.Join(m.arosDir, "config.toml"),
-			[]byte("# Aros project config — see ~/.aros/config.toml for global defaults\n"), 0644)
-		m.project = s
-		m.sessionID = meta.ID
-		m.sessionName = meta.Name
-		return phaseResultMsg{phase: "init"}
+		cfgPath := filepath.Join(arosDir, "config.toml")
+		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+			_ = os.WriteFile(cfgPath, []byte("# Aros project config — overrides ~/.aros/config.toml\n"), 0644)
+		}
+		return sessionLoadedMsg{project: s, sessionID: meta.ID, sessionName: meta.Name}
 	}
 }
 
+// sessionLoadedMsg installs a freshly created session.
+type sessionLoadedMsg struct {
+	project     *state.ProjectState
+	sessionID   string
+	sessionName string
+}
+
 func (m *Model) setAgentModel(agentName, modelName string) error {
-	if m.cfg.Agents == nil {
-		return fmt.Errorf("no agents configured")
-	}
 	ac, ok := m.cfg.Agents[agentName]
 	if !ok {
 		return fmt.Errorf("unknown agent %q", agentName)
@@ -1176,21 +1326,15 @@ func (m *Model) setAgentModel(agentName, modelName string) error {
 }
 
 func (m *Model) setAgentDense(agentName, level string) error {
-	if m.cfg.Agents == nil {
-		return fmt.Errorf("no agents configured")
-	}
 	ac, ok := m.cfg.Agents[agentName]
 	if !ok {
 		return fmt.Errorf("unknown agent %q", agentName)
 	}
-	found := false
-	for _, valid := range knownDenseLevels {
-		if level == valid {
-			found = true
-			break
-		}
-	}
-	if !found {
+	switch level {
+	case "off", "none", "":
+		level = ""
+	case "lite", "full", "ultra":
+	default:
 		return fmt.Errorf("unknown dense level %q; valid: %s", level, strings.Join(knownDenseLevels, ", "))
 	}
 	ac.Dense = level
@@ -1202,12 +1346,18 @@ func (m *Model) setJudge(agentName string) error {
 	if _, ok := m.cfg.Agents[agentName]; !ok {
 		return fmt.Errorf("unknown agent %q", agentName)
 	}
+	if _, ok := m.reg[agentName]; !ok {
+		return fmt.Errorf("agent %q is not available (disabled or binary missing)", agentName)
+	}
 	m.cfg.Judge.Agent = agentName
 	return nil
 }
 
 func (m *Model) rebuildRegistry() error {
-	reg, err := agent.BuildRegistry(m.cfg, m.cwd)
+	reg, warnings, err := agent.BuildRegistry(m.cfg, m.cwd)
+	for _, w := range warnings {
+		m.addSystem("warning: " + w)
+	}
 	if err != nil {
 		return err
 	}
