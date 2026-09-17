@@ -7,8 +7,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+)
+
+// Bounded timeouts: secondmem talks to a local LLM (Ollama). If that stalls,
+// a phase must degrade to "no memory context" instead of hanging forever.
+const (
+	askTimeout    = 30 * time.Second
+	ingestTimeout = 90 * time.Second
+	// inline text above this size is passed via a temp file to stay clear of argv limits
+	inlineLimit = 500
 )
 
 // SecondMem provides Ask and Ingest operations via the secondmem CLI binary.
@@ -21,16 +31,24 @@ func New(binary string, enabled bool) *SecondMem {
 	if binary == "" {
 		binary = "secondmem"
 	}
+	if enabled {
+		if _, err := exec.LookPath(binary); err != nil {
+			enabled = false // binary missing → behave as disabled, never fail a phase
+		}
+	}
 	return &SecondMem{Binary: binary, Enabled: enabled}
 }
 
 // Ask queries the secondmem knowledge base and returns the answer.
 // Returns empty string if secondmem is disabled or an error occurs (non-fatal).
 func (s *SecondMem) Ask(ctx context.Context, question string) string {
-	if !s.Enabled {
+	if s == nil || !s.Enabled || strings.TrimSpace(question) == "" {
 		return ""
 	}
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, s.Binary, "ask", question)
+	cmd.Stdin = nil
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -39,12 +57,14 @@ func (s *SecondMem) Ask(ctx context.Context, question string) string {
 }
 
 // Ingest stores text into the secondmem knowledge base.
-// Non-fatal: logs warning on error but does not return it.
+// Non-fatal for callers: they log the error and continue.
 func (s *SecondMem) Ingest(ctx context.Context, text string) error {
-	if !s.Enabled {
+	if s == nil || !s.Enabled || strings.TrimSpace(text) == "" {
 		return nil
 	}
-	if len(text) > 500 {
+	ctx, cancel := context.WithTimeout(ctx, ingestTimeout)
+	defer cancel()
+	if len(text) > inlineLimit {
 		return s.ingestViaFile(ctx, text)
 	}
 	cmd := exec.CommandContext(ctx, s.Binary, "ingest", text)

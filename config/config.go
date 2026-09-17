@@ -9,10 +9,10 @@ import (
 )
 
 type Config struct {
-	Judge    JudgeConfig             `mapstructure:"judge"`
-	Agents   map[string]AgentConfig  `mapstructure:"agents"`
+	Judge     JudgeConfig            `mapstructure:"judge"`
+	Agents    map[string]AgentConfig `mapstructure:"agents"`
 	SecondMem SecondMemConfig        `mapstructure:"secondmem"`
-	Work     WorkConfig              `mapstructure:"work"`
+	Work      WorkConfig             `mapstructure:"work"`
 }
 
 type JudgeConfig struct {
@@ -25,7 +25,8 @@ type AgentConfig struct {
 	Strengths []string `mapstructure:"strengths"`
 	Dense     string   `mapstructure:"dense"` // "" (off), "lite", "full", "ultra"
 	// DangerouslySkipPerms is only used in the work phase
-	DangerouslySkipPerms bool `mapstructure:"dangerously_skip_perms"`
+	DangerouslySkipPerms bool   `mapstructure:"dangerously_skip_perms"`
+	APIKey               string `mapstructure:"api_key"` // passed as env var to subprocess
 }
 
 type SecondMemConfig struct {
@@ -34,8 +35,8 @@ type SecondMemConfig struct {
 }
 
 type WorkConfig struct {
-	MaxConcurrent        int `mapstructure:"max_concurrent"`
-	AgentTimeoutSeconds  int `mapstructure:"agent_timeout_seconds"`
+	MaxConcurrent       int `mapstructure:"max_concurrent"`
+	AgentTimeoutSeconds int `mapstructure:"agent_timeout_seconds"`
 }
 
 func DefaultGlobalPath() string {
@@ -83,6 +84,7 @@ func Load(cfgFile string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	cfg.normalize()
 	return &cfg, nil
 }
 
@@ -98,12 +100,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agents.claude.dangerously_skip_perms", false)
 
 	v.SetDefault("agents.opencode.enabled", true)
-	v.SetDefault("agents.opencode.model", "openai/gpt-4o-mini")
+	// Run `opencode models` to see what your install can reach; needs `opencode auth login`.
+	v.SetDefault("agents.opencode.model", "openai/gpt-5.4-mini")
 	v.SetDefault("agents.opencode.strengths", []string{"implementation", "debugging", "testing"})
 	v.SetDefault("agents.opencode.dense", "full")
 
 	v.SetDefault("agents.copilot.enabled", true)
-	v.SetDefault("agents.copilot.model", "gpt-4.1")
+	// "auto" lets the Copilot CLI pick a model your plan has access to.
+	v.SetDefault("agents.copilot.model", "auto")
 	v.SetDefault("agents.copilot.strengths", []string{"implementation", "debugging", "refactoring"})
 	v.SetDefault("agents.copilot.dense", "full")
 
@@ -112,6 +116,27 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("work.max_concurrent", 2)
 	v.SetDefault("work.agent_timeout_seconds", 300)
+}
+
+// normalize clamps nonsensical values so callers never have to re-check them.
+func (c *Config) normalize() {
+	if c.Work.MaxConcurrent < 1 {
+		c.Work.MaxConcurrent = 1
+	}
+	if c.Work.AgentTimeoutSeconds < 1 {
+		c.Work.AgentTimeoutSeconds = 300
+	}
+	if c.Judge.Agent == "" {
+		c.Judge.Agent = "claude"
+	}
+	for name, ac := range c.Agents {
+		switch ac.Dense {
+		case "", "lite", "full", "ultra":
+		default:
+			ac.Dense = ""
+			c.Agents[name] = ac
+		}
+	}
 }
 
 // GlobalViper returns a Viper instance for config write-back (used by config set command).

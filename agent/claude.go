@@ -3,12 +3,18 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 )
 
+// DefaultClaudeModel is used when no model is configured.
+const DefaultClaudeModel = "haiku"
+
 // ClaudeAdapter calls the `claude` CLI in non-interactive mode.
+// The prompt is passed on stdin (claude -p reads stdin when no prompt argument
+// is given) so large prompts never hit the kernel's per-argument size limit.
 type ClaudeAdapter struct {
 	Model                string
 	DangerouslySkipPerms bool
@@ -22,40 +28,57 @@ type claudeResponse struct {
 	IsError bool   `json:"is_error"`
 }
 
+// errNoResult means stdout held no result object at all (parse failure).
+var errNoResult = errors.New("no result object found in claude output")
+
 func NewClaudeAdapter(model string, skipPerms bool, workDir string) (*ClaudeAdapter, error) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		return nil, ErrAgentNotAvailable
 	}
 	if model == "" {
-		model = "claude-sonnet-4-5"
+		model = DefaultClaudeModel
 	}
 	return &ClaudeAdapter{Model: model, DangerouslySkipPerms: skipPerms, WorkDir: workDir}, nil
 }
 
 func (a *ClaudeAdapter) Name() string { return "claude" }
 
+// Chat runs claude with --tools "" so it responds as a plain LLM without tool use.
+// Fast and non-blocking — suitable for conversational queries.
+func (a *ClaudeAdapter) Chat(ctx context.Context, prompt string) (AgentResult, error) {
+	args := []string{"-p", "--output-format", "json", "--model", a.Model, "--tools", ""}
+	return a.exec(ctx, args, prompt)
+}
+
 func (a *ClaudeAdapter) Run(ctx context.Context, prompt string) (AgentResult, error) {
-	args := []string{"-p", prompt, "--output-format", "json", "--model", a.Model}
+	args := []string{"-p", "--output-format", "json", "--model", a.Model}
 	if a.DangerouslySkipPerms {
 		args = append(args, "--dangerously-skip-permissions")
 	}
+	return a.exec(ctx, args, prompt)
+}
 
-	stdout, stderr, code, err := runCommand(ctx, "claude", args, a.WorkDir)
+func (a *ClaudeAdapter) exec(ctx context.Context, args []string, prompt string) (AgentResult, error) {
+	stdout, stderr, code, err := runCommand(ctx, "claude", args, a.WorkDir, strings.NewReader(prompt))
 	if err != nil {
-		return AgentResult{AgentName: "claude", Stderr: stderr, ExitCode: code}, err
+		return AgentResult{AgentName: "claude", Output: strings.TrimSpace(stdout), Stderr: stderr, ExitCode: code}, err
 	}
-
 	text, parseErr := parseClaudeJSON(stdout)
 	if parseErr != nil {
-		// Fallback: return raw stdout if JSON parse fails
-		return AgentResult{AgentName: "claude", Output: strings.TrimSpace(stdout), Stderr: stderr, ExitCode: code}, nil
+		if errors.Is(parseErr, errNoResult) {
+			// Not JSON at all (older CLI / plain text) — return raw stdout.
+			return AgentResult{AgentName: "claude", Output: strings.TrimSpace(stdout), Stderr: stderr, ExitCode: code}, nil
+		}
+		return AgentResult{AgentName: "claude", Output: text, Stderr: stderr, ExitCode: code}, parseErr
 	}
 	return AgentResult{AgentName: "claude", Output: text, Stderr: stderr, ExitCode: code}, nil
 }
 
+// parseClaudeJSON extracts the result text from `claude --output-format json`.
+// It returns errNoResult when no result object is present, and a descriptive
+// error (with the result text) when claude reports is_error.
 func parseClaudeJSON(raw string) (string, error) {
-	// claude --output-format json may emit multiple JSON objects (one per turn).
-	// We want the last one with type=="result".
+	// claude may emit multiple JSON objects (one per line); the last "result" wins.
 	lines := strings.Split(strings.TrimSpace(raw), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
@@ -68,10 +91,14 @@ func parseClaudeJSON(raw string) (string, error) {
 		}
 		if resp.Type == "result" {
 			if resp.IsError {
-				return "", fmt.Errorf("claude returned error result")
+				msg := strings.TrimSpace(resp.Result)
+				if msg == "" {
+					msg = resp.Subtype
+				}
+				return resp.Result, fmt.Errorf("claude error (%s): %s", resp.Subtype, msg)
 			}
 			return resp.Result, nil
 		}
 	}
-	return "", fmt.Errorf("no result object found in claude output")
+	return "", errNoResult
 }
