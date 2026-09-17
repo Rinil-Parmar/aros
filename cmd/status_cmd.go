@@ -54,10 +54,7 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	fmt.Printf("\n%-12s %-30s %-15s %s\n", "ID", "Title", "Agent", "Status")
 	fmt.Println(strings.Repeat("-", 75))
 	for _, t := range manifest.Tasks {
-		title := t.Title
-		if len(title) > 29 {
-			title = title[:26] + "..."
-		}
+		title := state.Truncate(t.Title, 29)
 		status := string(t.Status)
 		if t.Status == state.TaskBlocked {
 			status += " (" + t.BlockReason + ")"

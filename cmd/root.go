@@ -33,7 +33,7 @@ func init() {
 }
 
 func runTUI() error {
-	m := tui.New()
+	m := tui.New(cfgFile)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	tui.SetProgram(p)
 	_, err := p.Run()

@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"time"
 
@@ -70,17 +73,47 @@ func runWork(_ *cobra.Command, _ []string) error {
 	}
 
 	cwd := filepath.Dir(arosDir)
-	reg, err := agent.BuildRegistry(cfg, cwd)
+	reg, warnings, err := agent.BuildRegistry(cfg, cwd)
+	for _, w := range warnings {
+		fmt.Println("warning:", w)
+	}
 	if err != nil {
 		return err
 	}
 
 	mem := memory.New(cfg.SecondMem.Binary, cfg.SecondMem.Enabled)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 4*time.Hour)
+	defer cancelTimeout()
 
-	if err := worker.Run(ctx, manifest, arosDir, reg, mem, cfg.Work.MaxConcurrent, cfg.Work.AgentTimeoutSeconds); err != nil {
+	fmt.Printf("\n=== WORK PHASE ===\n%d tasks to execute (max %d concurrent)\n\n", len(manifest.Tasks), cfg.Work.MaxConcurrent)
+	opts := worker.Options{
+		MaxConcurrent: cfg.Work.MaxConcurrent,
+		TimeoutSec:    cfg.Work.AgentTimeoutSeconds,
+		FallbackAgent: cfg.Judge.Agent,
+	}
+	hooks := worker.Hooks{
+		Log: func(line string) { fmt.Println(line) },
+		TaskStart: func(t *state.Task, agentName string) {
+			fmt.Printf("[%s] starting → %s (%s)\n", t.ID, t.Title, agentName)
+		},
+		TaskDone: func(t *state.Task, agentName string) {
+			fmt.Printf("[%s] done ✓\n", t.ID)
+		},
+		TaskBlocked: func(t *state.Task, agentName, reason string) {
+			fmt.Printf("[%s] blocked ✗ — %s\n", t.ID, reason)
+		},
+	}
+
+	res, err := worker.Run(ctx, manifest, arosDir, reg, mem, opts, hooks)
+	if err != nil {
+		if errors.Is(err, worker.ErrTasksBlocked) {
+			// Phase stays "work" so `aros work` retries the blocked tasks.
+			fmt.Printf("\n%d of %d task(s) done, %d blocked. Fix the blockers (see `aros status`) and run `aros work` again.\n", res.Done, res.Total, res.Blocked)
+			return nil
+		}
 		return err
 	}
 
@@ -89,6 +122,6 @@ func runWork(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("saving final state: %w", err)
 	}
 
-	fmt.Printf("\nProject %q complete!\n", s.ProjectName)
+	fmt.Printf("\n=== All tasks complete ===\nProject %q complete!\n", s.ProjectName)
 	return nil
 }

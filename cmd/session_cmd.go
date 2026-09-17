@@ -155,11 +155,14 @@ func ensureArosDir() (string, error) {
 # agent = "claude"
 
 # [agents.claude]
-# model = "claude-opus-4-7"
+# model = "sonnet"
 
 # [agents.opencode]
-# model = "openai/gpt-4o"
+# model = "openai/gpt-5.4-mini"   # run "opencode models" to list what you can reach
 # enabled = true
+
+# [agents.copilot]
+# model = "auto"
 `
 		if err := os.WriteFile(cfgPath, []byte(defaultConfig), 0644); err != nil {
 			return "", fmt.Errorf("writing project config: %w", err)

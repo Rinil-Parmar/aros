@@ -50,7 +50,10 @@ func runPlan(cmd *cobra.Command, args []string) error {
 	}
 
 	cwd := filepath.Dir(arosDir)
-	reg, err := agent.BuildRegistry(cfg, cwd)
+	reg, warnings, err := agent.BuildRegistry(cfg, cwd)
+	for _, w := range warnings {
+		fmt.Println("warning:", w)
+	}
 	if err != nil {
 		return err
 	}
@@ -60,7 +63,7 @@ func runPlan(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	approvedPlan, err := planner.Run(ctx, task, reg, cfg.Judge.Agent, mem)
+	approvedPlan, err := planner.Run(ctx, task, reg, cfg.Judge.Agent, mem, time.Duration(cfg.Work.AgentTimeoutSeconds)*time.Second)
 	if err != nil {
 		return err
 	}

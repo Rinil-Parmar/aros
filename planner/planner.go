@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Rinil-Parmar/aros/agent"
 	"github.com/Rinil-Parmar/aros/human"
@@ -18,15 +19,18 @@ const maxApprovalLoops = 3
 // 2. The judge synthesizes all plans.
 // 3. Human approves or requests changes (up to maxApprovalLoops).
 // Returns the approved plan text.
-func Run(ctx context.Context, task string, reg agent.Registry, judgeName string, mem *memory.SecondMem) (string, error) {
-	agents := reg.Enabled(judgeName)
-	if len(agents) == 0 {
-		return "", fmt.Errorf("no agents available for planning")
+func Run(ctx context.Context, task string, reg agent.Registry, judgeName string, mem *memory.SecondMem, agentTimeout time.Duration) (string, error) {
+	if agentTimeout <= 0 {
+		agentTimeout = 5 * time.Minute
 	}
-
 	judge, err := reg.Judge(judgeName)
 	if err != nil {
 		return "", err
+	}
+	agents := reg.Enabled(judgeName)
+	if len(agents) == 0 {
+		// Judge is the only agent: it drafts the plan itself, then synthesizes.
+		agents = []agent.Agent{judge}
 	}
 
 	// Fetch relevant secondmem context (non-blocking — empty string if unavailable)
@@ -35,27 +39,42 @@ func Run(ctx context.Context, task string, reg agent.Registry, judgeName string,
 	fmt.Printf("\n=== PLAN PHASE ===\nTask: %s\n\n", task)
 	fmt.Printf("Querying %d agent(s) for plans...\n", len(agents))
 
-	// Collect plans in parallel
+	// Collect plans in parallel. A failed agent is dropped rather than fed to
+	// the judge as a bogus "(error: ...)" plan.
 	results := make([]agent.AgentResult, len(agents))
-	g, gctx := errgroup.WithContext(ctx)
+	var g errgroup.Group
 	for i, a := range agents {
-		i, a := i, a
 		g.Go(func() error {
 			fmt.Printf("  [%s] generating plan...\n", a.Name())
 			prompt := buildPlanPrompt(task, memCtx)
-			r, err := a.Run(gctx, prompt)
+			tctx, cancel := context.WithTimeout(ctx, agentTimeout)
+			defer cancel()
+			r, err := a.Run(tctx, prompt)
 			if err != nil {
-				fmt.Printf("  [%s] warning: %v\n", a.Name(), err)
-				r = agent.AgentResult{AgentName: a.Name(), Output: fmt.Sprintf("(error: %v)", err)}
+				fmt.Printf("  [%s] failed: %v\n", a.Name(), err)
+				return nil
+			}
+			if strings.TrimSpace(r.Output) == "" {
+				fmt.Printf("  [%s] returned an empty plan, skipping\n", a.Name())
+				return nil
 			}
 			results[i] = r
 			fmt.Printf("  [%s] done\n", a.Name())
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
-		return "", err
+	_ = g.Wait()
+
+	var plans []agent.AgentResult
+	for _, r := range results {
+		if r.Output != "" {
+			plans = append(plans, r)
+		}
 	}
+	if len(plans) == 0 {
+		return "", fmt.Errorf("every agent failed to produce a plan — check agent credentials/models (aros config show)")
+	}
+	results = plans
 
 	// Synthesis + approval loop
 	feedback := ""
