@@ -188,6 +188,8 @@ aros work
 
 Tasks execute in dependency order, up to `max_concurrent` agents in parallel. Each agent gets context from its dependencies and from secondmem. If an agent hits an ambiguous decision, it outputs `<<AROS_HUMAN>>` and pauses for your input.
 
+If an agent fails, its task is marked **blocked** (and so are tasks that depend on it) while the rest of the run continues. The phase stays at `work`; `aros status` shows the block reason, and running `aros work` again retries every blocked task. Agent subprocesses that exceed `agent_timeout_seconds` are killed together with their child processes.
+
 ### Check status
 
 ```bash
@@ -232,17 +234,19 @@ agent = "claude"
 
 [agents.claude]
 enabled   = true
-model     = "claude-sonnet-4-5"
+model     = "haiku"                  # any model name `claude --model` accepts
 strengths = ["architecture", "reasoning", "docs", "planning"]
+dense     = "full"                   # "", "lite", "full" or "ultra" — terser agent output
 
 [agents.opencode]
 enabled   = true
-model     = "anthropic/claude-sonnet-4-5"
+model     = "openai/gpt-5.4-mini"    # provider/model — see `opencode models`
 strengths = ["implementation", "debugging", "testing"]
+# api_key = "sk-..."                 # optional; exported as OPENAI_API_KEY / ANTHROPIC_API_KEY etc.
 
 [agents.copilot]
 enabled   = true
-model     = "claude-sonnet-4.5"
+model     = "auto"                   # let the Copilot CLI pick; explicit names must be enabled on your plan
 strengths = ["implementation", "debugging", "refactoring"]
 
 [secondmem]
@@ -257,24 +261,26 @@ agent_timeout_seconds = 300
 ### Change a model or judge
 
 ```bash
-aros config set agents.claude.model claude-opus-4-7
-aros config set agents.opencode.model openai/gpt-4o
+aros config set agents.claude.model sonnet
+aros config set agents.opencode.model anthropic/claude-sonnet-4-5
 aros config set judge.agent opencode
 ```
 
-Or in the TUI:
+Or in the TUI (applies to the current session only):
 
 ```
-/model claude claude-opus-4-7
+/model claude sonnet
 /judge opencode
 ```
+
+OpenCode needs provider credentials (`opencode auth login`) and the Copilot CLI needs `copilot login`; Aros surfaces their errors verbatim when a call fails.
 
 ### Add Gemini via OpenCode
 
 ```toml
 [agents.opencode-gemini]
 enabled   = true
-model     = "google/gemini-2.0-flash"
+model     = "google/gemini-2.5-flash"
 strengths = ["research", "analysis"]
 ```
 
@@ -308,7 +314,7 @@ All state lives in `.aros/` inside your project directory:
         └── manifest.json   # task list with assignments and statuses
 ```
 
-State transitions are forward-only. Use `--force` to re-run a phase.
+State transitions are forward-only. Use `--force` to re-run a phase, or `aros phase <phase>` to jump anywhere. In the TUI, `/phase <phase> --force` also aborts a running phase (agent subprocesses are killed).
 
 ---
 
@@ -333,6 +339,15 @@ Aros never proceeds past a critical decision without your approval:
 - [Viper](https://github.com/spf13/viper) — config management
 - [errgroup](https://pkg.go.dev/golang.org/x/sync/errgroup) — parallel agent execution
 - [secondmem](https://github.com/Rinil-Parmar/secondmem) — local AI knowledge base
+
+---
+
+## Testing
+
+```bash
+go test -race ./...          # unit tests + headless TUI flow test (uses a mock claude)
+scripts/e2e-mock.sh          # full CLI flow with mock agents, including blocked-task retry
+```
 
 ---
 
