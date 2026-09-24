@@ -36,7 +36,7 @@ func Run(ctx context.Context, s *state.ProjectState, reg agent.Registry, cfg *co
 		fmt.Printf("[Judge: %s] dividing into tasks (attempt %d/%d)...\n", judge.Name(), attempt, maxApprovalLoops)
 
 		dividePrompt := BuildDividePrompt(s, cfg, reg.Names(), feedback)
-		result, err := judge.Run(ctx, dividePrompt)
+		result, err := agent.Reason(ctx, judge, dividePrompt)
 		if err != nil {
 			return nil, fmt.Errorf("judge failed: %w", err)
 		}
@@ -137,7 +137,7 @@ func parseTasksWithRetry(ctx context.Context, judge agent.Agent, raw, originalPr
 	for i := 0; i < maxRetries; i++ {
 		fmt.Printf("  parse failed (%v), asking judge again (%d/%d)...\n", err, i+1, maxRetries)
 		retryPrompt := originalPrompt + "\n\nPrevious response could not be parsed as JSON. Return ONLY the JSON array, nothing else."
-		result, rerr := judge.Run(ctx, retryPrompt)
+		result, rerr := agent.Reason(ctx, judge, retryPrompt)
 		if rerr != nil {
 			err = rerr
 			continue

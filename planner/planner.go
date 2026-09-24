@@ -49,7 +49,7 @@ func Run(ctx context.Context, task string, reg agent.Registry, judgeName string,
 			prompt := buildPlanPrompt(task, memCtx)
 			tctx, cancel := context.WithTimeout(ctx, agentTimeout)
 			defer cancel()
-			r, err := a.Run(tctx, prompt)
+			r, err := agent.Reason(tctx, a, prompt)
 			if err != nil {
 				fmt.Printf("  [%s] failed: %v\n", a.Name(), err)
 				return nil
@@ -82,7 +82,7 @@ func Run(ctx context.Context, task string, reg agent.Registry, judgeName string,
 		fmt.Printf("\n[Judge: %s] synthesizing plans (attempt %d/%d)...\n", judge.Name(), attempt, maxApprovalLoops)
 
 		judgePrompt := buildJudgePrompt(task, results, feedback)
-		judgeResult, err := judge.Run(ctx, judgePrompt)
+		judgeResult, err := agent.Reason(ctx, judge, judgePrompt)
 		if err != nil {
 			return "", fmt.Errorf("judge failed: %w", err)
 		}

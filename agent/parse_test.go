@@ -96,3 +96,65 @@ func TestRunCommandStdin(t *testing.T) {
 		t.Fatalf("stdin not forwarded: out=%q code=%d err=%v", out, code, err)
 	}
 }
+
+// toolsAgent records which mode was used.
+type toolsAgent struct{ lastMode string }
+
+func (t *toolsAgent) Name() string { return "mock" }
+func (t *toolsAgent) Run(ctx context.Context, p string) (AgentResult, error) {
+	t.lastMode = "run"
+	return AgentResult{Output: "run"}, nil
+}
+func (t *toolsAgent) Chat(ctx context.Context, p string) (AgentResult, error) {
+	t.lastMode = "chat"
+	return AgentResult{Output: "chat"}, nil
+}
+
+type runOnlyAgent struct{ called bool }
+
+func (r *runOnlyAgent) Name() string { return "runonly" }
+func (r *runOnlyAgent) Run(ctx context.Context, p string) (AgentResult, error) {
+	r.called = true
+	return AgentResult{Output: "run"}, nil
+}
+
+// Reasoning calls must use the tool-less path so coding CLIs answer instead of
+// trying to perform the task (which broke plan output and divide JSON).
+func TestReasonPrefersToolLessMode(t *testing.T) {
+	ta := &toolsAgent{}
+	if _, err := Reason(context.Background(), ta, "plan this"); err != nil {
+		t.Fatal(err)
+	}
+	if ta.lastMode != "chat" {
+		t.Fatalf("Reason used %q, want chat", ta.lastMode)
+	}
+
+	ro := &runOnlyAgent{}
+	if _, err := Reason(context.Background(), ro, "plan this"); err != nil {
+		t.Fatal(err)
+	}
+	if !ro.called {
+		t.Fatal("Reason did not fall back to Run")
+	}
+}
+
+// The claude adapter's chat mode must disable tools; run mode must keep them.
+func TestClaudeChatDisablesToolsRunKeepsThem(t *testing.T) {
+	a := &ClaudeAdapter{Model: "haiku", DangerouslySkipPerms: true}
+
+	chat := strings.Join(a.chatArgs(), " ")
+	if !strings.Contains(chat, "--tools  ") && !strings.HasSuffix(chat, "--tools ") {
+		t.Fatalf("chat args must pass an empty --tools: %q", chat)
+	}
+	if strings.Contains(chat, "--dangerously-skip-permissions") {
+		t.Fatalf("chat must not request write permissions: %q", chat)
+	}
+
+	run := strings.Join(a.runArgs(), " ")
+	if strings.Contains(run, "--tools") {
+		t.Fatalf("run must keep tools enabled: %q", run)
+	}
+	if !strings.Contains(run, "--dangerously-skip-permissions") {
+		t.Fatalf("run must honour dangerously_skip_perms: %q", run)
+	}
+}

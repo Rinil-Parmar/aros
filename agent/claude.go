@@ -43,19 +43,29 @@ func NewClaudeAdapter(model string, skipPerms bool, workDir string) (*ClaudeAdap
 
 func (a *ClaudeAdapter) Name() string { return "claude" }
 
-// Chat runs claude with --tools "" so it responds as a plain LLM without tool use.
-// Fast and non-blocking — suitable for conversational queries.
-func (a *ClaudeAdapter) Chat(ctx context.Context, prompt string) (AgentResult, error) {
-	args := []string{"-p", "--output-format", "json", "--model", a.Model, "--tools", ""}
-	return a.exec(ctx, args, prompt)
+// chatArgs disables every tool so claude answers instead of trying to perform
+// the task — required for planning, judging and chat.
+func (a *ClaudeAdapter) chatArgs() []string {
+	return []string{"-p", "--output-format", "json", "--model", a.Model, "--tools", ""}
 }
 
-func (a *ClaudeAdapter) Run(ctx context.Context, prompt string) (AgentResult, error) {
+// runArgs leaves tools enabled: this is how work actually gets done.
+func (a *ClaudeAdapter) runArgs() []string {
 	args := []string{"-p", "--output-format", "json", "--model", a.Model}
 	if a.DangerouslySkipPerms {
 		args = append(args, "--dangerously-skip-permissions")
 	}
-	return a.exec(ctx, args, prompt)
+	return args
+}
+
+// Chat responds as a plain LLM without tool use. Fast — suitable for
+// conversational queries and any reasoning step.
+func (a *ClaudeAdapter) Chat(ctx context.Context, prompt string) (AgentResult, error) {
+	return a.exec(ctx, a.chatArgs(), prompt)
+}
+
+func (a *ClaudeAdapter) Run(ctx context.Context, prompt string) (AgentResult, error) {
+	return a.exec(ctx, a.runArgs(), prompt)
 }
 
 func (a *ClaudeAdapter) exec(ctx context.Context, args []string, prompt string) (AgentResult, error) {

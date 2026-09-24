@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Rinil-Parmar/aros/agent"
@@ -59,8 +60,21 @@ type Model struct {
 	cwd     string
 	busy    bool
 
-	// phaseCancel aborts the running phase's agent subprocesses (/phase --force etc).
+	// phaseCancel aborts the running phase's agent subprocesses (Esc, /phase --force).
 	phaseCancel context.CancelFunc
+	chatCancel  context.CancelFunc
+
+	// phaseGen/chatGen identify the current run. Both are drawn from genSeq —
+	// one monotonic sequence — so a retired phase generation can never collide
+	// with a live chat generation. Messages tagged with a generation that is no
+	// longer live are dropped.
+	genSeq   int
+	phaseGen int
+	chatGen  int
+
+	// initializing is true while the first session is being created, so a
+	// second line of input cannot create a duplicate project.
+	initializing bool
 
 	// manifest is a cached copy of the active session's task list for the
 	// right panel — reloaded on manifestChangedMsg, never read from disk in View().
@@ -106,15 +120,17 @@ var knownModels = map[string][]string{
 
 var knownDenseLevels = []string{"off", "lite", "full", "ultra"}
 
-var program *tea.Program
+// program is read by send() from many goroutines and written by SetProgram, so
+// it is stored atomically.
+var program atomic.Pointer[tea.Program]
 
-func SetProgram(p *tea.Program) { program = p }
+func SetProgram(p *tea.Program) { program.Store(p) }
 
 // send delivers a message to the event loop. Only call from goroutines —
 // never from inside Update (see messages.go).
 func send(msg tea.Msg) {
-	if program != nil {
-		program.Send(msg)
+	if p := program.Load(); p != nil {
+		p.Send(msg)
 	}
 }
 
@@ -209,7 +225,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Always-active quit
 		if key == "ctrl+c" {
-			m.cancelPhase()
+			m.cancelAll()
 			m.quitting = true
 			return m, tea.Quit
 		}
@@ -228,6 +244,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "shift+down":
 			m.viewport.LineDown(1)
+			return m, nil
+		}
+
+		// Universal escape hatch: abort whatever is running / pending and return
+		// to a clean idle state. Never leaves the UI wedged between modes.
+		switch key {
+		case "esc", "ctrl+g":
+			if m.cancelAll() {
+				m.addSystem("Cancelled.")
+			} else if m.textarea.Value() != "" {
+				m.textarea.Reset()
+			} else {
+				m.addSystem("Nothing to cancel.")
+			}
+			m.recalcLayout()
 			return m, nil
 		}
 
@@ -307,6 +338,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case phaseResultMsg:
+		if !m.live(msg.gen) {
+			break // stale: from an aborted or superseded run
+		}
 		if msg.project != nil {
 			m.project = msg.project
 			m.reloadManifest()
@@ -316,6 +350,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		m.phaseCancel = nil
+		m.initializing = false
 		if msg.err != nil {
 			m.addError(msg.err.Error())
 			m.clearActivity()
@@ -325,9 +360,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case streamLineMsg:
+		if !m.live(msg.gen) {
+			break
+		}
 		m.appendStream(msg.agent, msg.line)
 
 	case approvalMsg:
+		if !m.live(msg.gen) {
+			break
+		}
 		m.onYes = msg.onYes
 		m.onNo = msg.onNo
 		m.approvalQuestion = msg.question
@@ -335,13 +376,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recalcLayout()
 
 	case freeInputMsg:
+		if !m.live(msg.gen) {
+			break
+		}
 		m.busy = false // allow Enter so user can submit feedback
 		m.onFreeText = msg.callback
 		m.addSystem(msg.prompt)
 		m.setMode(modeText, msg.prompt)
 
 	case chatDoneMsg:
+		if !m.live(msg.gen) {
+			break // stale: the chat was cancelled or replaced
+		}
 		m.chatInProgress = false
+		m.chatCancel = nil
 		if msg.err != nil {
 			m.addError(msg.err.Error())
 		}
@@ -356,7 +404,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.rejectIfBusy() || !m.ready() {
 			break
 		}
-		go runPlan(m.newPhaseRun(), msg.task)
+		pr := m.newPhaseRun()
+		safeGo(pr.gen, func() { runPlan(pr, msg.task) })
 
 	case sessionNewMsg:
 		m.busy = false
@@ -366,6 +415,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case sessionLoadedMsg:
+		m.initializing = false
 		m.project = msg.project
 		m.sessionID = msg.sessionID
 		m.sessionName = msg.sessionName
@@ -373,6 +423,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handlePhaseResult(phaseResultMsg{phase: "init"})
 
 	case agentActivityMsg:
+		if !m.live(msg.gen) {
+			break // stale: an aborted run must not repopulate the activity panel
+		}
 		m.setActivity(msg)
 	}
 
@@ -444,29 +497,66 @@ func (m *Model) ready() bool {
 	return true
 }
 
-// newPhaseRun snapshots everything a phase goroutine needs and marks the model busy.
+// nextGen returns a generation number that has never been used before.
+func (m *Model) nextGen() int {
+	m.genSeq++
+	return m.genSeq
+}
+
+// live reports whether a message's generation still belongs to a current run.
+// gen 0 means the message is not owned by a run (system messages).
+func (m *Model) live(gen int) bool {
+	return gen == 0 || gen == m.phaseGen || gen == m.chatGen
+}
+
+// newPhaseRun snapshots everything a phase goroutine needs, bumps the phase
+// generation and marks the model busy.
 func (m *Model) newPhaseRun() phaseRun {
+	m.stopPhase() // cancel anything still running from a previous generation
 	ctx, cancel := context.WithCancel(context.Background())
 	m.phaseCancel = cancel
+	m.phaseGen = m.nextGen()
 	m.busy = true
-	pr := phaseRun{ctx: ctx, cfg: m.cfg, reg: m.reg, mem: m.mem, arosDir: m.arosDir}
+	pr := phaseRun{gen: m.phaseGen, ctx: ctx, cfg: m.cfg, reg: m.reg, mem: m.mem, arosDir: m.arosDir}
 	if m.project != nil {
 		pr.project = *m.project
 	}
 	return pr
 }
 
-// cancelPhase aborts the running phase (kills agent subprocesses) and unlocks input.
-func (m *Model) cancelPhase() {
+// stopPhase cancels the running phase (killing agent subprocesses) and retires
+// its generation so late messages from it are ignored.
+func (m *Model) stopPhase() {
 	if m.phaseCancel != nil {
 		m.phaseCancel()
 		m.phaseCancel = nil
 	}
+	m.phaseGen = m.nextGen() // retire: nothing in flight carries this number
 	m.busy = false
 	m.onYes, m.onNo, m.onFreeText = nil, nil, nil
 	m.approvalQuestion = ""
+}
+
+// stopChat cancels an in-flight chat and retires its generation.
+func (m *Model) stopChat() {
+	if m.chatCancel != nil {
+		m.chatCancel()
+		m.chatCancel = nil
+	}
+	m.chatGen = m.nextGen() // retire
+	m.chatInProgress = false
+}
+
+// cancelAll aborts everything in flight and returns the UI to a clean, usable
+// idle state. This is the universal escape hatch (Esc / Ctrl+G / --force).
+// Returns false if there was nothing to cancel.
+func (m *Model) cancelAll() bool {
+	had := m.busy || m.chatInProgress || m.mode == modeApproval || m.onFreeText != nil
+	m.stopPhase()
+	m.stopChat()
 	m.clearActivity()
 	m.setMode(modeText, "")
+	return had
 }
 
 func (m *Model) isBusy() bool { return m.busy || m.chatInProgress }
@@ -502,10 +592,10 @@ func (m *Model) handleInput(text string) tea.Cmd {
 			// Callbacks may run agents or call send(); they must run off the event loop.
 			if lower == "y" || lower == "yes" {
 				if cbYes != nil {
-					go cbYes()
+					safeGo(m.phaseGen, cbYes)
 				}
 			} else if cbNo != nil {
-				go cbNo()
+				safeGo(m.phaseGen, cbNo)
 			}
 			return nil
 		}
@@ -518,7 +608,7 @@ func (m *Model) handleInput(text string) tea.Cmd {
 			m.onFreeText = nil
 			m.busy = true
 			m.setMode(modeIdle, "")
-			go cb(text)
+			safeGo(m.phaseGen, func() { cb(text) })
 			return nil
 		}
 		return m.dispatch(text)
@@ -528,6 +618,11 @@ func (m *Model) handleInput(text string) tea.Cmd {
 
 func (m *Model) dispatch(text string) tea.Cmd {
 	if m.project == nil {
+		if m.initializing {
+			m.addSystem("Creating the project — one moment.")
+			return nil
+		}
+		m.initializing = true
 		return m.initProject(text)
 	}
 
@@ -541,12 +636,14 @@ func (m *Model) dispatch(text string) tea.Cmd {
 		if m.rejectIfBusy() || !m.ready() {
 			return nil
 		}
-		go runDivide(m.newPhaseRun())
+		pr := m.newPhaseRun()
+		safeGo(pr.gen, func() { runDivide(pr) })
 	case lower == "work":
 		if m.rejectIfBusy() || !m.ready() {
 			return nil
 		}
-		go runWork(m.newPhaseRun())
+		pr := m.newPhaseRun()
+		safeGo(pr.gen, func() { runWork(pr) })
 	case lower == "plan" || strings.HasPrefix(lower, "plan "):
 		if m.rejectIfBusy() || !m.ready() {
 			return nil
@@ -560,7 +657,8 @@ func (m *Model) dispatch(text string) tea.Cmd {
 			m.addSystem("What do you want to build?")
 			m.setMode(modeText, "task")
 		} else {
-			go runPlan(m.newPhaseRun(), task)
+			pr := m.newPhaseRun()
+			safeGo(pr.gen, func() { runPlan(pr, task) })
 		}
 	default:
 		return m.startChat(text)
@@ -580,7 +678,7 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		m.showHelp()
 
 	case "/quit", "/exit":
-		m.cancelPhase()
+		m.cancelAll()
 		m.quitting = true
 		return tea.Quit
 
@@ -702,7 +800,7 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		}
 		if m.isBusy() && force {
 			m.addSystem("Aborting the running operation — tasks in flight will be marked blocked.")
-			m.cancelPhase()
+			m.cancelAll()
 		}
 		switch sub {
 		case "new":
@@ -751,7 +849,7 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		}
 		if m.isBusy() && force {
 			m.addSystem("Aborting the running operation — tasks in flight will be marked blocked.")
-			m.cancelPhase()
+			m.cancelAll()
 		}
 		if err := m.setPhase(parts[1]); err != nil {
 			m.addError(err.Error())
@@ -842,6 +940,8 @@ func (m *Model) showHelp() {
 		"  /phase <phase> [--force]    set phase (init|plan|divide|work|done); --force aborts a running phase",
 		"  /clear                     clear chat history",
 		"  /help, /quit",
+		"",
+		"Esc or Ctrl+G        cancel whatever is running and return to idle",
 		"",
 		"Phase shortcut: Shift+Tab (cycle init → plan → divide → work → done)",
 		"Scrolling: pgup/pgdn  •  shift+up/down  •  mouse wheel",
@@ -954,7 +1054,12 @@ func (m *Model) startChat(text string) tea.Cmd {
 	}
 
 	judgeCfg := m.cfg.Agents[judgeName]
+	m.stopChat() // retire any previous chat generation
 	m.chatInProgress = true
+	m.chatGen = m.nextGen()
+	gen := m.chatGen
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.Work.AgentTimeoutSeconds)*time.Second)
+	m.chatCancel = cancel
 	m.setActivity(agentActivityMsg{agent: judgeName, model: judgeCfg.Model, status: "running", line: "thinking..."})
 
 	// Snapshot for the goroutine.
@@ -969,33 +1074,35 @@ func (m *Model) startChat(text string) tea.Cmd {
 		manifest = &mf
 	}
 	mem := m.mem
-	timeout := time.Duration(m.cfg.Work.AgentTimeoutSeconds) * time.Second
 
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
+		// bubbletea recovers panics in commands, but that kills the program —
+		// turn one into an ordinary chat error instead.
+		defer func() {
+			if r := recover(); r != nil {
+				send(chatDoneMsg{gen: gen, err: panicErr(r)})
+			}
+		}()
 
 		memCtx := mem.Ask(ctx, text)
 		prompt := withDense(buildChatPrompt(text, project, manifest, memCtx), judgeCfg)
 
-		var result agent.AgentResult
-		var runErr error
-		if ca, ok := judge.(agent.ChatAgent); ok {
-			result, runErr = ca.Chat(ctx, prompt)
-		} else {
-			result, runErr = judge.Run(ctx, prompt)
-		}
+		result, runErr := agent.Reason(ctx, judge, prompt)
 		if runErr != nil {
-			send(agentActivityMsg{agent: judgeName, status: "error", line: runErr.Error()})
-			return chatDoneMsg{err: fmt.Errorf("chat: %w", runErr)}
+			if ctx.Err() != nil {
+				return chatDoneMsg{gen: gen, err: fmt.Errorf("chat cancelled")}
+			}
+			send(agentActivityMsg{gen: gen, agent: judgeName, status: "error", line: runErr.Error()})
+			return chatDoneMsg{gen: gen, err: fmt.Errorf("chat: %w", runErr)}
 		}
 		if strings.TrimSpace(result.Output) == "" {
-			send(streamLineMsg{agent: judgeName, line: "(no response)"})
+			send(streamLineMsg{gen: gen, agent: judgeName, line: "(no response)"})
 		} else {
-			streamOutput(judgeName, result.Output)
+			streamOutput(gen, judgeName, result.Output)
 		}
-		send(agentActivityMsg{agent: judgeName, status: "done", line: "done"})
-		return chatDoneMsg{}
+		send(agentActivityMsg{gen: gen, agent: judgeName, status: "done", line: "done"})
+		return chatDoneMsg{gen: gen}
 	}
 }
 

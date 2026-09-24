@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -18,33 +19,66 @@ import (
 
 const judgeTimeout = 10 * time.Minute
 
-func streamOutput(agentName, output string) {
+// safeGo runs a phase goroutine that can never take the program down: an
+// unrecovered panic anywhere would kill the process and leave the terminal in
+// the alternate screen. A panic is reported as a phase error instead, which
+// also releases the busy flag so the UI stays usable.
+// gen is the generation the goroutine belongs to (0 = ungated).
+func safeGo(gen int, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				send(phaseResultMsg{gen: gen, err: panicErr(r)})
+			}
+		}()
+		fn()
+	}()
+}
+
+// safeGoQuiet is safeGo for background work that owns no phase (e.g. memory
+// ingest): a panic is logged, not turned into a phase result.
+func safeGoQuiet(fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				send(streamLineMsg{agent: "aros", line: "warning: " + panicErr(r).Error()})
+			}
+		}()
+		fn()
+	}()
+}
+
+func panicErr(r any) error {
+	return fmt.Errorf("internal error: %v\n%s", r, truncate(string(debug.Stack()), 600))
+}
+
+func streamOutput(gen int, agentName, output string) {
 	for _, line := range strings.Split(output, "\n") {
 		if strings.TrimSpace(line) != "" {
-			send(streamLineMsg{agent: agentName, line: line})
+			send(streamLineMsg{gen: gen, agent: agentName, line: line})
 		}
 	}
 }
 
 func ingestAsync(pr phaseRun, text string) {
-	go func() {
+	safeGoQuiet(func() {
 		if err := pr.mem.Ingest(context.Background(), text); err != nil {
-			send(streamLineMsg{agent: "aros", line: "warning: secondmem ingest failed: " + err.Error()})
+			send(streamLineMsg{gen: pr.gen, agent: "aros", line: "warning: secondmem ingest failed: " + err.Error()})
 		}
-	}()
+	})
 }
 
 // runPlan runs the plan phase in a goroutine, sending bubbletea messages back.
 func runPlan(pr phaseRun, task string) {
 	if err := state.RequirePhase(&pr.project, false, state.PhaseInit, state.PhasePlan); err != nil {
-		send(phaseResultMsg{err: err})
+		send(phaseResultMsg{gen: pr.gen, err: err})
 		return
 	}
 
 	judgeName := pr.cfg.Judge.Agent
 	judge, err := pr.reg.Judge(judgeName)
 	if err != nil {
-		send(phaseResultMsg{err: err})
+		send(phaseResultMsg{gen: pr.gen, err: err})
 		return
 	}
 	agents := pr.reg.Enabled(judgeName)
@@ -53,7 +87,7 @@ func runPlan(pr phaseRun, task string) {
 		agents = []agent.Agent{judge}
 	}
 
-	send(streamLineMsg{agent: "aros", line: fmt.Sprintf("Querying %d agent(s) for plans...", len(agents))})
+	send(streamLineMsg{gen: pr.gen, agent: "aros", line: fmt.Sprintf("Querying %d agent(s) for plans...", len(agents))})
 
 	memCtx := pr.mem.Ask(pr.ctx, task)
 
@@ -62,24 +96,24 @@ func runPlan(pr phaseRun, task string) {
 	for i, a := range agents {
 		g.Go(func() error {
 			agentCfg := pr.cfg.Agents[a.Name()]
-			send(agentActivityMsg{agent: a.Name(), model: agentCfg.Model, status: "running", line: "thinking..."})
+			send(agentActivityMsg{gen: pr.gen, agent: a.Name(), model: agentCfg.Model, status: "running", line: "thinking..."})
 
 			tctx, cancel := context.WithTimeout(pr.ctx, time.Duration(pr.cfg.Work.AgentTimeoutSeconds)*time.Second)
 			defer cancel()
 			prompt := withDense(buildPlanPrompt(task, memCtx), agentCfg)
-			r, err := a.Run(tctx, prompt)
+			r, err := agent.Reason(tctx, a, prompt)
 			if err != nil {
-				send(streamLineMsg{agent: a.Name(), line: "error: " + err.Error()})
-				send(agentActivityMsg{agent: a.Name(), status: "error", line: err.Error()})
+				send(streamLineMsg{gen: pr.gen, agent: a.Name(), line: "error: " + err.Error()})
+				send(agentActivityMsg{gen: pr.gen, agent: a.Name(), status: "error", line: err.Error()})
 				return nil // non-fatal: other agents may still deliver
 			}
 			if strings.TrimSpace(r.Output) == "" {
-				send(agentActivityMsg{agent: a.Name(), status: "error", line: "empty plan"})
+				send(agentActivityMsg{gen: pr.gen, agent: a.Name(), status: "error", line: "empty plan"})
 				return nil
 			}
 			plans[i] = agentPlan{name: a.Name(), output: r.Output}
-			streamOutput(a.Name(), r.Output)
-			send(agentActivityMsg{agent: a.Name(), status: "done", line: "plan ready"})
+			streamOutput(pr.gen, a.Name(), r.Output)
+			send(agentActivityMsg{gen: pr.gen, agent: a.Name(), status: "done", line: "plan ready"})
 			return nil
 		})
 	}
@@ -92,11 +126,11 @@ func runPlan(pr phaseRun, task string) {
 		}
 	}
 	if len(good) == 0 {
-		send(phaseResultMsg{err: fmt.Errorf("every agent failed to produce a plan — check credentials/models with /agents")})
+		send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("every agent failed to produce a plan — check credentials/models with /agents")})
 		return
 	}
 	if pr.ctx.Err() != nil {
-		send(phaseResultMsg{err: pr.ctx.Err()})
+		send(phaseResultMsg{gen: pr.gen, err: pr.ctx.Err()})
 		return
 	}
 
@@ -106,17 +140,17 @@ func runPlan(pr phaseRun, task string) {
 		if feedback != "" {
 			label = "revising plan..."
 		}
-		send(streamLineMsg{agent: "judge", line: label})
-		send(agentActivityMsg{agent: "judge", model: judgeCfg.Model, status: "running", line: label})
+		send(streamLineMsg{gen: pr.gen, agent: "judge", line: label})
+		send(agentActivityMsg{gen: pr.gen, agent: "judge", model: judgeCfg.Model, status: "running", line: label})
 		ctx, cancel := context.WithTimeout(pr.ctx, judgeTimeout)
 		defer cancel()
-		r, err := judge.Run(ctx, withDense(buildJudgePlanPrompt(task, good, feedback), judgeCfg))
+		r, err := agent.Reason(ctx, judge, withDense(buildJudgePlanPrompt(task, good, feedback), judgeCfg))
 		if err != nil {
-			send(agentActivityMsg{agent: "judge", status: "error", line: err.Error()})
+			send(agentActivityMsg{gen: pr.gen, agent: "judge", status: "error", line: err.Error()})
 			return "", fmt.Errorf("judge: %w", err)
 		}
-		streamOutput("judge", r.Output)
-		send(agentActivityMsg{agent: "judge", status: "done", line: "synthesis ready"})
+		streamOutput(pr.gen, "judge", r.Output)
+		send(agentActivityMsg{gen: pr.gen, agent: "judge", status: "done", line: "synthesis ready"})
 		return r.Output, nil
 	}
 
@@ -126,10 +160,10 @@ func runPlan(pr phaseRun, task string) {
 		proj.ApprovedPlan = plan
 		proj.Phase = state.PhasePlan
 		if err := state.SaveState(pr.arosDir, &proj); err != nil {
-			send(phaseResultMsg{err: fmt.Errorf("saving state: %w", err)})
+			send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("saving state: %w", err)})
 			return
 		}
-		send(phaseResultMsg{phase: "plan_done", project: &proj})
+		send(phaseResultMsg{gen: pr.gen, phase: "plan_done", project: &proj})
 		ingestAsync(pr, "Approved plan for "+proj.ProjectName+":\n"+plan)
 	}
 
@@ -138,23 +172,23 @@ func runPlan(pr phaseRun, task string) {
 	round = func(feedback string, attempt int) {
 		plan, err := synthesize(feedback)
 		if err != nil {
-			send(phaseResultMsg{err: err})
+			send(phaseResultMsg{gen: pr.gen, err: err})
 			return
 		}
 		q := "Approve this plan?"
 		if attempt > 1 {
 			q = "Approve revised plan?"
 		}
-		send(approvalMsg{
+		send(approvalMsg{gen: pr.gen,
 			question: q,
 			onYes:    func() { approve(plan) },
 			onNo: func() {
 				if attempt >= 3 {
-					send(streamLineMsg{agent: "aros", line: "Plan not approved after 3 rounds. Type 'plan <task>' to start over."})
-					send(phaseResultMsg{phase: ""})
+					send(streamLineMsg{gen: pr.gen, agent: "aros", line: "Plan not approved after 3 rounds. Type 'plan <task>' to start over."})
+					send(phaseResultMsg{gen: pr.gen, phase: ""})
 					return
 				}
-				send(freeInputMsg{
+				send(freeInputMsg{gen: pr.gen,
 					prompt:   "What should change? (feedback for the judge)",
 					callback: func(fb string) { round(fb, attempt+1) },
 				})
@@ -167,23 +201,23 @@ func runPlan(pr phaseRun, task string) {
 // runDivide runs the divide phase in a goroutine.
 func runDivide(pr phaseRun) {
 	if err := state.RequirePhase(&pr.project, false, state.PhasePlan); err != nil {
-		send(phaseResultMsg{err: err})
+		send(phaseResultMsg{gen: pr.gen, err: err})
 		return
 	}
 	if strings.TrimSpace(pr.project.ApprovedPlan) == "" {
-		send(phaseResultMsg{err: fmt.Errorf("no approved plan — run 'plan <task>' first")})
+		send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("no approved plan — run 'plan <task>' first")})
 		return
 	}
 	judgeName := pr.cfg.Judge.Agent
 	judge, err := pr.reg.Judge(judgeName)
 	if err != nil {
-		send(phaseResultMsg{err: err})
+		send(phaseResultMsg{gen: pr.gen, err: err})
 		return
 	}
 
 	judgeCfg := pr.cfg.Agents[judgeName]
-	send(streamLineMsg{agent: "judge", line: "breaking plan into tasks..."})
-	send(agentActivityMsg{agent: "judge", model: judgeCfg.Model, status: "running", line: "breaking plan into tasks..."})
+	send(streamLineMsg{gen: pr.gen, agent: "judge", line: "breaking plan into tasks..."})
+	send(agentActivityMsg{gen: pr.gen, agent: "judge", model: judgeCfg.Model, status: "running", line: "breaking plan into tasks..."})
 
 	ctx, cancel := context.WithTimeout(pr.ctx, judgeTimeout)
 	defer cancel()
@@ -198,21 +232,21 @@ func runDivide(pr phaseRun) {
 		if feedback != "" {
 			prompt += "\n\n" + feedback
 		}
-		result, err := judge.Run(ctx, withDense(prompt, judgeCfg))
+		result, err := agent.Reason(ctx, judge, withDense(prompt, judgeCfg))
 		if err != nil {
-			send(agentActivityMsg{agent: "judge", status: "error", line: err.Error()})
-			send(phaseResultMsg{err: fmt.Errorf("judge: %w", err)})
+			send(agentActivityMsg{gen: pr.gen, agent: "judge", status: "error", line: err.Error()})
+			send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("judge: %w", err)})
 			return
 		}
 		parsed, perr := state.ParseTasks(result.Output)
 		if perr != nil {
-			send(streamLineMsg{agent: "judge", line: fmt.Sprintf("could not parse task JSON (%v), retrying %d/3...", perr, attempt)})
+			send(streamLineMsg{gen: pr.gen, agent: "judge", line: fmt.Sprintf("could not parse task JSON (%v), retrying %d/3...", perr, attempt)})
 			feedback = "Previous response could not be parsed as JSON. Return ONLY the JSON array — no markdown, no prose, no fences."
 			continue
 		}
 		state.AssignIDs(parsed)
 		if verr := state.ValidateTasks(parsed); verr != nil {
-			send(streamLineMsg{agent: "judge", line: fmt.Sprintf("invalid task graph (%v), retrying %d/3...", verr, attempt)})
+			send(streamLineMsg{gen: pr.gen, agent: "judge", line: fmt.Sprintf("invalid task graph (%v), retrying %d/3...", verr, attempt)})
 			feedback = fmt.Sprintf("The previous task list was invalid: %v. Fix it and return ONLY the JSON array.", verr)
 			continue
 		}
@@ -220,49 +254,49 @@ func runDivide(pr phaseRun) {
 		break
 	}
 	if tasks == nil {
-		send(agentActivityMsg{agent: "judge", status: "error", line: "no valid task list"})
-		send(phaseResultMsg{err: fmt.Errorf("judge did not produce a valid task list after 3 attempts")})
+		send(agentActivityMsg{gen: pr.gen, agent: "judge", status: "error", line: "no valid task list"})
+		send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("judge did not produce a valid task list after 3 attempts")})
 		return
 	}
-	send(agentActivityMsg{agent: "judge", status: "done", line: "tasks generated"})
+	send(agentActivityMsg{gen: pr.gen, agent: "judge", status: "done", line: "tasks generated"})
 
 	if reassigned := state.NormalizeAssignments(tasks, available, judgeName); len(reassigned) > 0 {
-		send(streamLineMsg{agent: "aros", line: fmt.Sprintf("note: %d task(s) named an unavailable agent — reassigned to %s: %s",
+		send(streamLineMsg{gen: pr.gen, agent: "aros", line: fmt.Sprintf("note: %d task(s) named an unavailable agent — reassigned to %s: %s",
 			len(reassigned), judgeName, strings.Join(reassigned, ", "))})
 	}
 
-	send(streamLineMsg{agent: "judge", line: fmt.Sprintf("Generated %d tasks:", len(tasks))})
-	send(streamLineMsg{agent: "judge", line: fmt.Sprintf("%-12s %-28s %-14s %s", "ID", "Title", "Agent", "Deps")})
-	send(streamLineMsg{agent: "judge", line: strings.Repeat("─", 65)})
+	send(streamLineMsg{gen: pr.gen, agent: "judge", line: fmt.Sprintf("Generated %d tasks:", len(tasks))})
+	send(streamLineMsg{gen: pr.gen, agent: "judge", line: fmt.Sprintf("%-12s %-28s %-14s %s", "ID", "Title", "Agent", "Deps")})
+	send(streamLineMsg{gen: pr.gen, agent: "judge", line: strings.Repeat("─", 65)})
 	for _, t := range tasks {
 		deps := strings.Join(t.Dependencies, ",")
 		if deps == "" {
 			deps = "—"
 		}
-		send(streamLineMsg{agent: "judge", line: fmt.Sprintf("%-12s %-28s %-14s %s", t.ID, truncate(t.Title, 27), t.AssignedTo, deps)})
+		send(streamLineMsg{gen: pr.gen, agent: "judge", line: fmt.Sprintf("%-12s %-28s %-14s %s", t.ID, truncate(t.Title, 27), t.AssignedTo, deps)})
 	}
 
 	manifest := &state.TaskManifest{Tasks: tasks}
 
-	send(approvalMsg{
+	send(approvalMsg{gen: pr.gen,
 		question: fmt.Sprintf("Approve %d task assignments?", len(tasks)),
 		onYes: func() {
 			if err := state.SaveManifest(pr.arosDir, manifest); err != nil {
-				send(phaseResultMsg{err: fmt.Errorf("saving manifest: %w", err)})
+				send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("saving manifest: %w", err)})
 				return
 			}
 			proj := pr.project
 			proj.Phase = state.PhaseDivide
 			if err := state.SaveState(pr.arosDir, &proj); err != nil {
-				send(phaseResultMsg{err: fmt.Errorf("saving state: %w", err)})
+				send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("saving state: %w", err)})
 				return
 			}
 			send(manifestChangedMsg{})
-			send(phaseResultMsg{phase: "divide_done", project: &proj})
+			send(phaseResultMsg{gen: pr.gen, phase: "divide_done", project: &proj})
 		},
 		onNo: func() {
-			send(streamLineMsg{agent: "aros", line: "Cancelled. Type 'divide' to try again."})
-			send(phaseResultMsg{phase: ""})
+			send(streamLineMsg{gen: pr.gen, agent: "aros", line: "Cancelled. Type 'divide' to try again."})
+			send(phaseResultMsg{gen: pr.gen, phase: ""})
 		},
 	})
 }
@@ -270,16 +304,16 @@ func runDivide(pr phaseRun) {
 // runWork runs the work phase in a goroutine via the shared worker scheduler.
 func runWork(pr phaseRun) {
 	if err := state.RequirePhase(&pr.project, false, state.PhaseDivide, state.PhaseWork); err != nil {
-		send(phaseResultMsg{err: err})
+		send(phaseResultMsg{gen: pr.gen, err: err})
 		return
 	}
 	manifest, err := state.LoadManifest(pr.arosDir)
 	if err != nil {
-		send(phaseResultMsg{err: err})
+		send(phaseResultMsg{gen: pr.gen, err: err})
 		return
 	}
 	if len(manifest.Tasks) == 0 {
-		send(phaseResultMsg{err: fmt.Errorf("no tasks to execute; run divide first")})
+		send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("no tasks to execute; run divide first")})
 		return
 	}
 
@@ -287,10 +321,10 @@ func runWork(pr phaseRun) {
 	started := pr.project
 	started.Phase = state.PhaseWork
 	_ = state.SaveState(pr.arosDir, &started)
-	send(phaseResultMsg{phase: "work_started", project: &started})
+	send(phaseResultMsg{gen: pr.gen, phase: "work_started", project: &started})
 
 	maxConcurrent := pr.cfg.Work.MaxConcurrent
-	send(streamLineMsg{agent: "aros", line: fmt.Sprintf("Starting %d tasks (max %d concurrent)...", len(manifest.Tasks), maxConcurrent)})
+	send(streamLineMsg{gen: pr.gen, agent: "aros", line: fmt.Sprintf("Starting %d tasks (max %d concurrent)...", len(manifest.Tasks), maxConcurrent)})
 
 	opts := worker.Options{
 		MaxConcurrent: maxConcurrent,
@@ -298,29 +332,29 @@ func runWork(pr phaseRun) {
 		FallbackAgent: pr.cfg.Judge.Agent,
 	}
 	hooks := worker.Hooks{
-		Log: func(line string) { send(streamLineMsg{agent: "aros", line: line}) },
+		Log: func(line string) { send(streamLineMsg{gen: pr.gen, agent: "aros", line: line}) },
 		TaskStart: func(t *state.Task, agentName string) {
-			send(streamLineMsg{agent: agentName, line: fmt.Sprintf("[%s] ► %s", t.ID, t.Title)})
-			send(agentActivityMsg{agent: agentName, model: pr.cfg.Agents[agentName].Model, status: "running", line: fmt.Sprintf("[%s] %s", t.ID, t.Title)})
+			send(streamLineMsg{gen: pr.gen, agent: agentName, line: fmt.Sprintf("[%s] ► %s", t.ID, t.Title)})
+			send(agentActivityMsg{gen: pr.gen, agent: agentName, model: pr.cfg.Agents[agentName].Model, status: "running", line: fmt.Sprintf("[%s] %s", t.ID, t.Title)})
 			send(manifestChangedMsg{})
 		},
 		TaskOutput: func(t *state.Task, agentName, output string) {
-			streamOutput(agentName, output)
+			streamOutput(pr.gen, agentName, output)
 		},
 		TaskDone: func(t *state.Task, agentName string) {
-			send(streamLineMsg{agent: agentName, line: fmt.Sprintf("[%s] ✓ done", t.ID)})
-			send(agentActivityMsg{agent: agentName, status: "done", line: fmt.Sprintf("[%s] done", t.ID)})
+			send(streamLineMsg{gen: pr.gen, agent: agentName, line: fmt.Sprintf("[%s] ✓ done", t.ID)})
+			send(agentActivityMsg{gen: pr.gen, agent: agentName, status: "done", line: fmt.Sprintf("[%s] done", t.ID)})
 			send(manifestChangedMsg{})
 		},
 		TaskBlocked: func(t *state.Task, agentName, reason string) {
-			send(streamLineMsg{agent: agentName, line: fmt.Sprintf("[%s] ✗ blocked: %s", t.ID, reason)})
-			send(agentActivityMsg{agent: agentName, status: "error", line: truncate(reason, 60)})
+			send(streamLineMsg{gen: pr.gen, agent: agentName, line: fmt.Sprintf("[%s] ✗ blocked: %s", t.ID, reason)})
+			send(agentActivityMsg{gen: pr.gen, agent: agentName, status: "error", line: truncate(reason, 60)})
 			send(manifestChangedMsg{})
 		},
 		AskHuman: func(t *state.Task, question string) (string, error) {
-			send(streamLineMsg{agent: t.AssignedTo, line: fmt.Sprintf("[%s] needs input: %s", t.ID, question)})
+			send(streamLineMsg{gen: pr.gen, agent: t.AssignedTo, line: fmt.Sprintf("[%s] needs input: %s", t.ID, question)})
 			answerCh := make(chan string, 1)
-			send(freeInputMsg{
+			send(freeInputMsg{gen: pr.gen,
 				prompt:   fmt.Sprintf("[%s] %s", t.ID, question),
 				callback: func(text string) { answerCh <- text },
 			})
@@ -340,15 +374,15 @@ func runWork(pr phaseRun) {
 	send(manifestChangedMsg{})
 	if err != nil {
 		if errors.Is(err, worker.ErrTasksBlocked) {
-			send(phaseResultMsg{err: fmt.Errorf("%d of %d done, %d blocked — fix the blockers (see status) and type 'work' to retry them", res.Done, res.Total, res.Blocked)})
+			send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("%d of %d done, %d blocked — fix the blockers (see status) and type 'work' to retry them", res.Done, res.Total, res.Blocked)})
 			return
 		}
-		send(phaseResultMsg{err: err})
+		send(phaseResultMsg{gen: pr.gen, err: err})
 		return
 	}
 
 	finished := pr.project
 	finished.Phase = state.PhaseDone
 	_ = state.SaveState(pr.arosDir, &finished)
-	send(phaseResultMsg{phase: "work_done", project: &finished})
+	send(phaseResultMsg{gen: pr.gen, phase: "work_done", project: &finished})
 }

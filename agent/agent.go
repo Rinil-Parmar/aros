@@ -98,3 +98,16 @@ func stderrSuffix(stderr string) string {
 	}
 	return "\nstderr: " + stderr
 }
+
+// Reason runs a pure-reasoning prompt (planning, judging, dividing, chat).
+// It prefers the agent's tool-less mode when one exists: the underlying CLIs
+// are coding agents, so with tools enabled they try to *perform* the task
+// instead of answering — which produced agentic chatter where a plan or a JSON
+// task array was expected, and burned tokens doing it.
+// Only the work phase should call Run directly.
+func Reason(ctx context.Context, a Agent, prompt string) (AgentResult, error) {
+	if ca, ok := a.(ChatAgent); ok {
+		return ca.Chat(ctx, prompt)
+	}
+	return a.Run(ctx, prompt)
+}
