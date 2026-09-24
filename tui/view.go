@@ -378,11 +378,11 @@ func (m *Model) renderShortcutsBar() string {
 	}
 
 	shortcuts := []struct{ key, desc string }{
+		{"Esc", "cancel"},
 		{"Ctrl+H", "help"},
 		{"Ctrl+K", "clear"},
 		{"Ctrl+S", "status"},
 		{"pgup/dn", "scroll"},
-		{"wheel", "scroll"},
 	}
 
 	sep := lipgloss.NewStyle().Foreground(colorDim).Render("  ·  ")

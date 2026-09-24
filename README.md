@@ -68,13 +68,13 @@ Launch `aros` with no arguments to open the interactive TUI.
 ╭──────────────────────────────────────────────────────────────────╮
 │ ❯                                                                │
 ╰──────────────────────────────────────────────────────────────────╯
-  Ctrl+H help  ·  Ctrl+K clear  ·  Ctrl+S status  ·  pgup/dn scroll
+  Esc cancel  ·  Ctrl+H help  ·  Ctrl+K clear  ·  Ctrl+S status  ·  pgup/dn scroll
 ```
 
 **Layout:**
 - **Left panel** — scrollable conversation history with all agent output
 - **Right panel** — live agent activity with spinner, model name, and latest line; configured agents list; current project and phase
-- **Approval card** — appears inline when a decision is needed; dismissed by `y` or `n`
+- **Approval card** — appears inline when a decision is needed; dismissed by `y` or `n`, or cancelled with `Esc`
 - **Input box** — rounded border (brand purple when active, muted when busy); spinner replaces `❯` during processing
 - **Shortcuts bar** — always-visible keyboard reference at the bottom
 
@@ -83,7 +83,8 @@ Launch `aros` with no arguments to open the interactive TUI.
 | Key | Action |
 |---|---|
 | `Enter` | Send message / confirm |
-| `y` / `n` | Answer approval prompts |
+| `y` / `n` | Answer approval prompts (no Enter needed) |
+| `Esc` / `Ctrl+G` | Cancel whatever is running and return to idle |
 | `Ctrl+H` | Show help |
 | `Ctrl+K` | Clear chat history |
 | `Ctrl+S` | Show project status |
@@ -107,6 +108,20 @@ Launch `aros` with no arguments to open the interactive TUI.
 | `/phase <phase>` | Set phase (init|plan|divide|work|done) |
 | `help` | Show all commands |
 | _Any other text_ | Chat with the judge agent |
+
+---
+
+## How agents are invoked
+
+Aros calls each agent CLI in one of two modes:
+
+| Mode | Used by | Why |
+|---|---|---|
+| **Reasoning** (tools disabled, e.g. `claude --tools ""`) | plan, divide, judge, chat | These CLIs are coding agents. With tools enabled they try to *perform* the task instead of answering, which produced agentic chatter where a plan or a JSON task array was expected — and burned tokens doing it. |
+| **Work** (tools enabled) | work phase only | This is where the agent actually edits files and runs commands. |
+
+Set `dangerously_skip_perms = true` under `[agents.claude]` so the work phase can
+write files without an interactive permission prompt.
 
 ---
 

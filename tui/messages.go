@@ -52,13 +52,23 @@ type bootstrapMsg struct {
 
 // streamLineMsg is sent by goroutines streaming agent output line by line.
 type streamLineMsg struct {
+	gen   int
 	agent string
 	line  string
 }
 
+// Generation gating: every phase run and every chat is tagged with a
+// generation drawn from one monotonic sequence, so phase and chat generations
+// can never collide. The model drops any message whose generation is no longer
+// live. Without this, late messages from an aborted or superseded run flip
+// busy/mode and repopulate the activity panel under the run that replaced it —
+// which is how the UI ended up wedged between modes.
+// gen == 0 means "not owned by a run" and is always accepted.
+
 // phaseResultMsg carries the final result of a phase operation.
 // project, when non-nil, replaces the model's project (goroutines never mutate it directly).
 type phaseResultMsg struct {
+	gen     int
 	phase   string
 	err     error
 	project *state.ProjectState
@@ -66,6 +76,7 @@ type phaseResultMsg struct {
 
 // approvalMsg requests a y/n response from the user.
 type approvalMsg struct {
+	gen      int
 	question string
 	onYes    func() // run in a goroutine when user types y
 	onNo     func() // run in a goroutine when user types n
@@ -73,12 +84,16 @@ type approvalMsg struct {
 
 // freeInputMsg requests freeform text from the user.
 type freeInputMsg struct {
+	gen      int
 	prompt   string
 	callback func(text string) // run in a goroutine
 }
 
 // chatDoneMsg signals that a judge chat finished.
-type chatDoneMsg struct{ err error }
+type chatDoneMsg struct {
+	gen int
+	err error
+}
 
 // manifestChangedMsg tells the model to reload its cached task manifest.
 type manifestChangedMsg struct{}
@@ -86,6 +101,7 @@ type manifestChangedMsg struct{}
 // agentActivityMsg updates the live activity panel for a single agent.
 // status: "running" | "done" | "error" | "clear" (clear resets all activity)
 type agentActivityMsg struct {
+	gen    int
 	agent  string
 	model  string // empty = keep existing model
 	status string

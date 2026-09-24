@@ -17,6 +17,7 @@ import (
 const mockClaude = `#!/usr/bin/env bash
 set -euo pipefail
 prompt="$(cat)"
+if [[ -n "${AROS_TEST_SLEEP:-}" ]]; then sleep "$AROS_TEST_SLEEP"; fi
 if [[ "$prompt" == *"Break this plan into concrete tasks."* ]]; then
   cat <<'JSON'
 {"type":"result","result":"[{\"id\":\"task-001\",\"title\":\"Core\",\"description\":\"Implement core.\",\"assigned_to\":\"claude\",\"dependencies\":[]},{\"id\":\"task-002\",\"title\":\"Tests\",\"description\":\"Add tests.\",\"assigned_to\":\"claude\",\"dependencies\":[\"task-001\"]},{\"id\":\"task-003\",\"title\":\"Docs\",\"description\":\"Write docs.\",\"assigned_to\":\"claude\",\"dependencies\":[]}]","is_error":false}
@@ -40,11 +41,11 @@ JSON
 fi
 `
 
-const testConfig = `[judge]
+const testConfigTmpl = `[judge]
 agent = "claude"
 [agents.claude]
 enabled = true
-model = "mock"
+model = "%s"
 [agents.opencode]
 enabled = false
 [agents.copilot]
@@ -70,24 +71,36 @@ type harness struct {
 	done chan error
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessWith(t, true) }
+
+// newHarnessWith(t, false) uses the real `claude` on PATH instead of the mock.
+func newHarnessWith(t *testing.T, mock bool) *harness {
 	t.Helper()
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(bin, 0755); err != nil {
-		t.Fatal(err)
+	if mock {
+		bin := filepath.Join(dir, "bin")
+		if err := os.MkdirAll(bin, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(mockClaude), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		// Isolate the global ~/.aros. Only safe with the mock: the real CLIs
+		// read their credentials from the real HOME and hang without them.
+		t.Setenv("HOME", dir)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(mockClaude), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("HOME", dir) // isolate ~/.aros
 
 	proj := filepath.Join(dir, "project")
 	if err := os.MkdirAll(filepath.Join(proj, ".aros"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(proj, ".aros", "config.toml"), []byte(testConfig), 0644); err != nil {
+	model := "mock"
+	if !mock {
+		model = "haiku" // real CLI: use a cheap, real model
+	}
+	cfg := fmt.Sprintf(testConfigTmpl, model)
+	if err := os.WriteFile(filepath.Join(proj, ".aros", "config.toml"), []byte(cfg), 0644); err != nil {
 		t.Fatal(err)
 	}
 	old, _ := os.Getwd()
@@ -350,4 +363,247 @@ func mustCwd(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return d
+}
+
+// ── "stuck between modes" regression tests ──────────────────────────────────
+//
+// These drive the model into every mode that can wait on something (approval,
+// free-text question, running phase, in-flight chat), abort it, and assert the
+// UI comes back to a clean state that accepts the next command.
+
+// assertIdle checks the model is in a fully operable idle state.
+func (h *harness) assertIdle(what string) {
+	h.t.Helper()
+	h.inspect(func(m *Model) {
+		if m.busy || m.chatInProgress {
+			h.t.Errorf("%s: still busy (busy=%v chat=%v)", what, m.busy, m.chatInProgress)
+		}
+		if m.mode != modeText {
+			h.t.Errorf("%s: mode=%d, want modeText", what, m.mode)
+		}
+		if m.onYes != nil || m.onNo != nil || m.onFreeText != nil {
+			h.t.Errorf("%s: pending callbacks not cleared", what)
+		}
+		if m.approvalQuestion != "" {
+			h.t.Errorf("%s: approval question still set", what)
+		}
+		if len(m.activity) != 0 {
+			h.t.Errorf("%s: activity panel not cleared", what)
+		}
+	})
+}
+
+func (h *harness) esc() { h.p.Send(tea.KeyMsg{Type: tea.KeyEsc}) }
+
+func (h *harness) startProject() {
+	h.t.Helper()
+	h.waitFor("bootstrap", 10*time.Second, func(m tea.Msg) bool { _, ok := m.(bootstrapMsg); return ok })
+	h.typeLine("demo")
+	h.waitFor("session created", 10*time.Second, func(m tea.Msg) bool { _, ok := m.(sessionLoadedMsg); return ok })
+}
+
+// Esc must unstick every waiting mode, and a new phase must start right after.
+func TestEscCancelsEveryMode(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	// 1. Esc while an approval is pending.
+	h.typeLine("plan a thing")
+	h.waitFor("approval", 30*time.Second, isApproval)
+	h.esc()
+	h.assertIdle("after Esc on approval")
+
+	// 2. Esc while a free-text question is pending.
+	h.typeLine("plan")
+	h.waitFor("task question", 10*time.Second, func(m tea.Msg) bool {
+		k, ok := m.(tea.KeyMsg)
+		return ok && k.Type == tea.KeyEnter
+	})
+	h.inspect(func(m *Model) {
+		if m.onFreeText == nil {
+			t.Error("expected a pending free-text question")
+		}
+	})
+	h.esc()
+	h.assertIdle("after Esc on free-text question")
+
+	// 3. Esc while a phase is actually running (slow agent).
+	t.Setenv("AROS_TEST_SLEEP", "20")
+	h.typeLine("plan something slow")
+	h.waitFor("plan started", 10*time.Second, func(m tea.Msg) bool {
+		sl, ok := m.(streamLineMsg)
+		return ok && strings.Contains(sl.line, "Querying")
+	})
+	h.esc()
+	h.assertIdle("after Esc on running phase")
+
+	// 4. Esc while a chat is in flight.
+	h.typeLine("how does this work?")
+	h.inspect(func(m *Model) {
+		if !m.chatInProgress {
+			t.Error("expected chat to be in progress")
+		}
+	})
+	h.esc()
+	h.assertIdle("after Esc on chat")
+
+	// 5. After all that, a normal phase still runs to completion.
+	t.Setenv("AROS_TEST_SLEEP", "")
+	h.typeLine("plan a fast thing")
+	h.waitFor("approval after cancels", 30*time.Second, isApproval)
+	h.typeLine("y")
+	h.waitFor("plan_done", 30*time.Second, phaseDone("plan_done"))
+	h.assertIdle("after completed plan")
+}
+
+// A late message from an aborted run must not disturb the run that replaced it.
+func TestStaleMessagesFromAbortedRunAreIgnored(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	h.typeLine("plan first")
+	h.waitFor("first approval", 30*time.Second, isApproval)
+
+	// Capture the retired generation, then abort and start a new run.
+	var oldGen int
+	h.inspect(func(m *Model) { oldGen = m.phaseGen })
+	h.esc()
+	h.typeLine("plan second")
+	h.waitFor("second approval", 30*time.Second, isApproval)
+
+	// Replay the aborted run's messages: they must all be dropped.
+	h.p.Send(phaseResultMsg{gen: oldGen, phase: "plan_done"})
+	h.p.Send(freeInputMsg{gen: oldGen, prompt: "stale question", callback: func(string) {}})
+	h.p.Send(approvalMsg{gen: oldGen, question: "stale approval"})
+	h.inspect(func(m *Model) {
+		if !m.busy {
+			t.Error("stale phase result cleared busy on the live run")
+		}
+		if m.onFreeText != nil {
+			t.Error("stale free-text prompt was installed")
+		}
+		if m.approvalQuestion == "stale approval" {
+			t.Error("stale approval replaced the live one")
+		}
+	})
+
+	// The live run still completes normally.
+	h.typeLine("y")
+	h.waitFor("plan_done", 30*time.Second, phaseDone("plan_done"))
+	h.inspect(func(m *Model) {
+		if m.project.Task != "second" {
+			t.Errorf("wrong task persisted: %q", m.project.Task)
+		}
+	})
+}
+
+// Starting a phase while one is already running must not leave two live runs.
+func TestSupersededRunDoesNotWedge(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	h.typeLine("plan one")
+	h.waitFor("approval", 30*time.Second, isApproval)
+
+	// 'divide' while an approval is pending is rejected, not silently queued.
+	h.typeLine("divide")
+	h.inspect(func(m *Model) {
+		if m.mode != modeApproval {
+			t.Errorf("approval was dropped by a rejected command (mode=%d)", m.mode)
+		}
+	})
+
+	// --force supersedes: old generation retired, model immediately usable.
+	h.typeLine("/phase plan --force")
+	h.assertIdle("after --force during approval")
+	h.typeLine("status")
+	h.inspect(func(m *Model) {
+		if m.busy {
+			t.Error("status left the model busy")
+		}
+	})
+}
+
+// A panic inside a phase goroutine must surface as an error, not kill the app.
+func TestPanicInPhaseGoroutineIsRecovered(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	h.inspect(func(m *Model) { m.busy = true; m.phaseGen++ })
+	var gen int
+	h.inspect(func(m *Model) { gen = m.phaseGen })
+	safeGo(gen, func() { panic("boom") })
+	h.waitFor("panic reported as phase error", 10*time.Second, func(m tea.Msg) bool {
+		pr, ok := m.(phaseResultMsg)
+		return ok && pr.err != nil && strings.Contains(pr.err.Error(), "internal error")
+	})
+	h.assertIdle("after recovered panic")
+}
+
+// Two fast lines of input must not create two projects.
+func TestDoubleInitCreatesOneSession(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.waitFor("bootstrap", 10*time.Second, func(m tea.Msg) bool { _, ok := m.(bootstrapMsg); return ok })
+
+	h.typeLine("projA")
+	h.typeLine("projB")
+	h.waitFor("session created", 10*time.Second, func(m tea.Msg) bool { _, ok := m.(sessionLoadedMsg); return ok })
+
+	sessions, err := state.ListSessions(filepath.Join(mustCwd(t), ".aros"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1: %+v", len(sessions), sessions)
+	}
+}
+
+// TestTUIWithRealClaude drives the TUI against the real `claude` CLI.
+// Opt-in (it spends tokens):  AROS_TEST_REAL=1 go test -run RealClaude ./tui/
+func TestTUIWithRealClaude(t *testing.T) {
+	if os.Getenv("AROS_TEST_REAL") == "" {
+		t.Skip("set AROS_TEST_REAL=1 to run against the real claude CLI")
+	}
+	h := newHarnessWith(t, false)
+	defer h.quit()
+	h.startProject()
+
+	// Chat must answer without running tools.
+	h.typeLine("Reply with exactly: pong")
+	h.waitFor("real chat reply", 120*time.Second, func(m tea.Msg) bool {
+		cd, ok := m.(chatDoneMsg)
+		if ok && cd.err != nil {
+			t.Fatalf("real chat failed: %v", cd.err)
+		}
+		return ok
+	})
+	h.inspect(func(m *Model) {
+		var got string
+		for _, msg := range m.messages {
+			if msg.Kind == kindAgent {
+				got = msg.Body
+			}
+		}
+		if !strings.Contains(strings.ToLower(got), "pong") {
+			t.Errorf("chat reply did not contain pong: %q", got)
+		}
+	})
+	h.assertIdle("after real chat")
+
+	// Plan must produce a real plan and reach the approval card.
+	h.typeLine("plan add a --version flag to a tiny Go CLI")
+	h.waitFor("real plan approval", 180*time.Second, isApproval)
+	h.typeLine("y")
+	h.waitFor("plan_done", 60*time.Second, phaseDone("plan_done"))
+	h.inspect(func(m *Model) {
+		if len(m.project.ApprovedPlan) < 80 {
+			t.Errorf("approved plan looks empty: %q", m.project.ApprovedPlan)
+		}
+	})
+	h.assertIdle("after real plan")
 }
