@@ -357,6 +357,15 @@ Aros never proceeds past a critical decision without your approval:
 
 ---
 
+## Architecture decisions
+
+Why Aros is built the way it is — subprocess adapters, the judge pattern, the
+phase model, the TUI concurrency rules — is recorded as ADRs in
+[`docs/adr/`](docs/adr/README.md). Worth reading before changing the TUI
+(ADR-0009, ADR-0014) or how agents are invoked (ADR-0013).
+
+---
+
 ## Testing
 
 ```bash
