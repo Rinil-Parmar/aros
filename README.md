@@ -203,6 +203,13 @@ aros work
 
 Tasks execute in dependency order, up to `max_concurrent` agents in parallel. Each agent gets context from its dependencies and from secondmem. If an agent hits an ambiguous decision, it outputs `<<AROS_HUMAN>>` and pauses for your input.
 
+> **⚠ Concurrent writes are not protected.** Parallel agents share one working
+> tree with no locking or isolation. If two tasks edit the same file, one
+> agent's work is silently overwritten and **both tasks still report success**.
+> Commit to git before running `work`, or set `work.max_concurrent = 1`.
+> Details: [`docs/parallel-execution.md`](docs/parallel-execution.md),
+> [ADR-0016](docs/adr/0016-no-file-level-conflict-protection.md).
+
 If an agent fails, its task is marked **blocked** (and so are tasks that depend on it) while the rest of the run continues. The phase stays at `work`; `aros status` shows the block reason, and running `aros work` again retries every blocked task. Agent subprocesses that exceed `agent_timeout_seconds` are killed together with their child processes.
 
 ### Check status
@@ -303,6 +310,9 @@ strengths = ["research", "analysis"]
 
 ## secondmem integration
 
+> Full technical detail — call sites, timeouts, embeddings, retrieval tiers and
+> known limits — is in [`docs/secondmem-integration.md`](docs/secondmem-integration.md).
+
 Aros uses [secondmem](https://github.com/Rinil-Parmar/secondmem) as a shared knowledge layer across agents:
 
 - Before planning, each agent queries secondmem for relevant context
@@ -357,12 +367,13 @@ Aros never proceeds past a critical decision without your approval:
 
 ---
 
-## Architecture decisions
+## Documentation
 
-Why Aros is built the way it is — subprocess adapters, the judge pattern, the
-phase model, the TUI concurrency rules — is recorded as ADRs in
-[`docs/adr/`](docs/adr/README.md). Worth reading before changing the TUI
-(ADR-0009, ADR-0014) or how agents are invoked (ADR-0013).
+| Document | What it covers |
+|---|---|
+| [`docs/adr/`](docs/adr/README.md) | Architecture Decision Records — why Aros is built the way it is. Read ADR-0009 and ADR-0014 before touching the TUI, ADR-0013 before changing how agents are invoked. |
+| [`docs/parallel-execution.md`](docs/parallel-execution.md) | How the work phase schedules tasks, how agent outputs are combined, and what happens when two agents edit the same file. |
+| [`docs/secondmem-integration.md`](docs/secondmem-integration.md) | The memory seam (every `ask`/`ingest` call site) and secondmem's internals: storage model, embeddings, retrieval tiers, rebalance. |
 
 ---
 

@@ -29,6 +29,7 @@ old one superseded.
 | [0013](0013-tool-less-reasoning-tool-enabled-work.md) | Reasoning steps run tool-less; only work gets tools | Accepted | 2026-09-23 |
 | [0014](0014-generation-gating-and-universal-cancel.md) | Gate UI messages by generation; one universal cancel key | Accepted | 2026-09-23 |
 | [0015](0015-v2-will-be-tui-only.md) | v2 will be TUI-only, dropping the Cobra CLI | **Proposed** | 2026-05-04 |
+| [0016](0016-no-file-level-conflict-protection.md) | Parallel tasks share one working tree with no conflict protection | Accepted *(known limitation)* | 2026-09-25 |
 
 ## Reading order
 
@@ -49,5 +50,14 @@ Before touching agent invocation:
 [0011](0011-subprocess-process-groups-and-stdin-prompts.md).
 
 Before touching the work phase:
-[0010](0010-single-ui-agnostic-work-scheduler.md) and
-[0012](0012-blocked-tasks-cascade-and-retry.md).
+[0010](0010-single-ui-agnostic-work-scheduler.md),
+[0012](0012-blocked-tasks-cascade-and-retry.md) and
+[0016](0016-no-file-level-conflict-protection.md) — the last one is the known
+unsafe default, and the first thing to fix.
+
+## Companion documents
+
+- [`docs/parallel-execution.md`](../parallel-execution.md) — how the work phase
+  schedules, how agent outputs combine, and the concurrent-write failure modes.
+- [`docs/secondmem-integration.md`](../secondmem-integration.md) — the memory
+  seam and secondmem's internals (storage, embeddings, retrieval, rebalance).
