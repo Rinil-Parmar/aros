@@ -607,3 +607,132 @@ func TestTUIWithRealClaude(t *testing.T) {
 	})
 	h.assertIdle("after real plan")
 }
+
+// ── copy / export ──────────────────────────────────────────────────────────────
+
+func TestTranscriptCopyAndExport(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	h.typeLine("what is this?")
+	h.waitFor("chat done", 20*time.Second, func(m tea.Msg) bool {
+		cd, ok := m.(chatDoneMsg)
+		return ok && cd.err == nil
+	})
+
+	// Plain transcript must contain both sides and no ANSI escapes or banner.
+	h.inspect(func(m *Model) {
+		all := m.plainTranscript("")
+		if !strings.Contains(all, "> what is this?") {
+			t.Errorf("transcript missing the user line: %q", all)
+		}
+		if !strings.Contains(all, "[claude") {
+			t.Errorf("transcript missing the agent header: %q", all)
+		}
+		if strings.Contains(all, "\x1b[") {
+			t.Error("transcript contains ANSI escape codes")
+		}
+		if strings.Contains(all, "█") {
+			t.Error("transcript should not include the ASCII banner")
+		}
+		if last := m.plainTranscript("last"); !strings.Contains(last, "Chat answer") {
+			t.Errorf("last-reply scope wrong: %q", last)
+		}
+	})
+
+	// Export writes a readable file.
+	out := filepath.Join(t.TempDir(), "t.md")
+	h.inspect(func(m *Model) {
+		if err := m.exportTranscript(out); err != nil {
+			t.Fatalf("export failed: %v", err)
+		}
+	})
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# Aros transcript") || !strings.Contains(string(data), "what is this?") {
+		t.Fatalf("exported file looks wrong:\n%s", data)
+	}
+}
+
+// Ctrl+O must hand mouse control back to the terminal so text can be selected.
+func TestMouseToggleForSelection(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	h.p.Send(tea.KeyMsg{Type: tea.KeyCtrlO})
+	h.inspect(func(m *Model) {
+		if !m.mouseOff {
+			t.Error("Ctrl+O did not turn mouse reporting off")
+		}
+	})
+	h.p.Send(tea.KeyMsg{Type: tea.KeyCtrlO})
+	h.inspect(func(m *Model) {
+		if m.mouseOff {
+			t.Error("Ctrl+O did not turn mouse reporting back on")
+		}
+	})
+}
+
+// Esc while the first session is being created must not wedge later input.
+func TestEscDuringInitDoesNotWedge(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.waitFor("bootstrap", 10*time.Second, func(m tea.Msg) bool { _, ok := m.(bootstrapMsg); return ok })
+
+	// Force the stuck state directly: this is the flag Esc used to leave set.
+	h.inspect(func(m *Model) { m.initializing = true })
+	h.esc()
+	h.inspect(func(m *Model) {
+		if m.initializing {
+			t.Fatal("Esc left initializing set — every later input would be rejected")
+		}
+	})
+
+	// The UI must still accept a project name afterwards.
+	h.typeLine("demo")
+	h.waitFor("session created", 10*time.Second, func(m tea.Msg) bool { _, ok := m.(sessionLoadedMsg); return ok })
+}
+
+// Switching to an unreadable session must leave the active session untouched.
+func TestUseSessionDoesNotSwitchOnUnreadableState(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	arosDir := filepath.Join(mustCwd(t), ".aros")
+	before, err := state.ActiveSessionID(arosDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A second session whose state.json is corrupt.
+	meta, _, err := state.CreateSession(arosDir, "broken")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(arosDir, "sessions", meta.ID, "state.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	h.inspect(func(m *Model) {
+		if err := m.useSession(meta.ID); err == nil {
+			t.Fatal("expected an error switching to a corrupt session")
+		}
+		if m.project == nil || m.project.ProjectName != "demo" {
+			t.Errorf("model project was replaced: %+v", m.project)
+		}
+	})
+
+	after, err := state.ActiveSessionID(arosDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("active session moved to the corrupt one: %s → %s", before, after)
+	}
+}

@@ -78,6 +78,12 @@ Launch `aros` with no arguments to open the interactive TUI.
 - **Input box** — rounded border (brand purple when active, muted when busy); spinner replaces `❯` during processing
 - **Shortcuts bar** — always-visible keyboard reference at the bottom
 
+**Copying text out of the chat:** a TUI with mouse reporting enabled receives
+your click-drag instead of letting the terminal select text. Press `Ctrl+O` to
+hand mouse control back to the terminal and select normally (wheel scrolling is
+off while in that mode), or use `Ctrl+Y` / `/copy` to put the whole chat on the
+clipboard, or `/export notes.md` to write it to a file.
+
 **TUI keyboard shortcuts:**
 
 | Key | Action |
@@ -85,6 +91,8 @@ Launch `aros` with no arguments to open the interactive TUI.
 | `Enter` | Send message / confirm |
 | `y` / `n` | Answer approval prompts (no Enter needed) |
 | `Esc` / `Ctrl+G` | Cancel whatever is running and return to idle |
+| `Ctrl+Y` | Copy the whole chat to the clipboard (OSC 52 — works over SSH) |
+| `Ctrl+O` | Toggle mouse reporting. Turn it **off** to select and copy text with the mouse |
 | `Ctrl+H` | Show help |
 | `Ctrl+K` | Clear chat history |
 | `Ctrl+S` | Show project status |
@@ -105,7 +113,9 @@ Launch `aros` with no arguments to open the interactive TUI.
 | `/judge <agent>` | Change the judge agent |
 | `/agents` | List all configured agents |
 | `/session <new|list|use|rm>` | Manage sessions |
-| `/phase <phase>` | Set phase (init|plan|divide|work|done) |
+| `/phase <phase>` | Set phase (init\|plan\|divide\|work\|done) |
+| `/copy [last]` | Copy the chat (or just the last agent reply) to the clipboard |
+| `/export [file]` | Write the chat to a markdown file |
 | `help` | Show all commands |
 | _Any other text_ | Chat with the judge agent |
 

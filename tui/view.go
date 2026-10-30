@@ -379,10 +379,17 @@ func (m *Model) renderShortcutsBar() string {
 
 	shortcuts := []struct{ key, desc string }{
 		{"Esc", "cancel"},
+		{"Ctrl+Y", "copy"},
 		{"Ctrl+H", "help"},
 		{"Ctrl+K", "clear"},
-		{"Ctrl+S", "status"},
 		{"pgup/dn", "scroll"},
+	}
+	// Tell the user which mode the mouse is in — otherwise "my wheel stopped
+	// working" and "I can't select text" are both mysteries.
+	if m.mouseOff {
+		shortcuts = append(shortcuts, struct{ key, desc string }{"Ctrl+O", "mouse off (select to copy)"})
+	} else {
+		shortcuts = append(shortcuts, struct{ key, desc string }{"Ctrl+O", "select mode"})
 	}
 
 	sep := lipgloss.NewStyle().Foreground(colorDim).Render("  ·  ")
