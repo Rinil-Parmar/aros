@@ -29,6 +29,8 @@ const (
 	modeIdle inputMode = iota
 	modeText
 	modeApproval
+	// modePicker: an overlay list owns the keyboard until it closes.
+	modePicker
 )
 
 // agentStatus tracks live state for one agent in the activity panel.
@@ -97,6 +99,7 @@ type Model struct {
 	manifest *state.TaskManifest
 
 	activity         map[string]*agentStatus
+	picker           *picker
 	approvalQuestion string
 	sessionID        string
 	sessionName      string
@@ -214,6 +217,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		key := msg.String()
+
+		// An open picker owns the keyboard: typing filters it, and the
+		// textarea must not also receive the keystrokes.
+		if m.mode == modePicker && m.picker != nil {
+			done, cmd := m.picker.handleKey(msg)
+			if done {
+				m.closePicker()
+			}
+			m.recalcLayout()
+			m.refreshViewport()
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return m, tea.Batch(cmds...)
+		}
 
 		// Always-active quit
 		if key == "ctrl+c" {
@@ -412,6 +430,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clearActivity()
 
+	case modelPickMsg:
+		m.busy = false
+		m.phaseCancel = nil
+		if !m.live(msg.gen) {
+			break
+		}
+		m.openModelPicker(msg)
+
 	case modelListMsg:
 		m.busy = false
 		m.phaseCancel = nil
@@ -584,12 +610,30 @@ func (m *Model) stopChat() {
 	m.chatInProgress = false
 }
 
+// openPicker shows an overlay list and gives it the keyboard.
+func (m *Model) openPicker(p *picker) {
+	m.picker = p
+	m.setMode(modePicker, "")
+	m.recalcLayout()
+	m.refreshViewport()
+}
+
+// closePicker hides the overlay and returns the keyboard to the input box.
+func (m *Model) closePicker() {
+	m.picker = nil
+	if m.mode == modePicker {
+		m.setMode(modeText, "")
+	}
+}
+
 // cancelAll aborts everything in flight and returns the UI to a clean, usable
 // idle state. This is the universal escape hatch (Esc / Ctrl+G / --force).
 // Returns false if there was nothing to cancel.
 func (m *Model) cancelAll() bool {
-	had := m.busy || m.chatInProgress || m.mode == modeApproval || m.onFreeText != nil || m.initializing
-	m.initializing = false // otherwise Esc mid-creation wedges every later input
+	had := m.busy || m.chatInProgress || m.mode == modeApproval || m.mode == modePicker ||
+		m.onFreeText != nil || m.initializing
+	m.initializing = false
+	m.picker = nil // otherwise Esc mid-creation wedges every later input
 	m.stopPhase()
 	m.stopChat()
 	m.clearActivity()
@@ -1045,9 +1089,10 @@ func (m *Model) showHelp() {
 		"  status           current state and tasks",
 		"",
 		"Slash commands:",
-		"  /model [agent] [text]      list or set an agent's model (text filters)",
+		"  /model [agent]             pick a model from a list (↑↓, type to filter, enter)",
 		"  /dense <agent> <level>     set dense output (off|lite|full|ultra)",
 		"  settings are saved to .aros/config.toml · --global or --session to change that",
+		"  /model <agent> <name>      set it directly if you know the exact name",
 		"  /judge <agent>             change which agent is the judge",
 		"  /agents                    show all configured agents",
 		"  /session <new|list|use|rm>  manage sessions",

@@ -118,3 +118,108 @@ func TestModelChangeSurvivesRestart(t *testing.T) {
 		}
 	})
 }
+
+// The picker flow: /model with no arguments must get you to a chosen model
+// without typing any exact name.
+func TestModelPickerFlowNeedsNoExactName(t *testing.T) {
+	h := newEchoHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	// /model with nothing else opens the agent chooser.
+	h.typeLine("/model")
+	h.inspect(func(m *Model) {
+		if m.mode != modePicker || m.picker == nil {
+			t.Fatalf("no picker opened (mode=%d)", m.mode)
+		}
+		if got, _ := m.picker.selected(); got.value != "claude" {
+			t.Fatalf("agent picker selected %+v", got)
+		}
+	})
+
+	// Enter on the agent kicks off the model lookup, which opens the second picker.
+	h.p.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	h.waitFor("models fetched", 60*time.Second, func(msg tea.Msg) bool {
+		_, ok := msg.(modelPickMsg)
+		return ok
+	})
+	h.inspect(func(m *Model) {
+		if m.mode != modePicker || m.picker == nil {
+			t.Fatalf("model picker not open (mode=%d)", m.mode)
+		}
+		if len(m.picker.items) == 0 {
+			t.Fatal("model picker is empty")
+		}
+	})
+
+	// Arrow to a different model and take it — no typing of exact names.
+	var chosen string
+	h.p.Send(tea.KeyMsg{Type: tea.KeyDown})
+	h.inspect(func(m *Model) {
+		got, ok := m.picker.selected()
+		if !ok {
+			t.Fatal("nothing selected after arrow down")
+		}
+		chosen = got.value
+	})
+	h.p.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	h.waitFor("model applied", 60*time.Second, func(msg tea.Msg) bool {
+		_, ok := msg.(modelSetMsg)
+		return ok
+	})
+
+	h.inspect(func(m *Model) {
+		if m.mode == modePicker {
+			t.Error("picker stayed open after selecting")
+		}
+		if got := m.cfg.Agents["claude"].Model; got != chosen {
+			t.Errorf("config has %q, picked %q", got, chosen)
+		}
+	})
+
+	// And it is the model actually used for the next call.
+	h.typeLine("which model?")
+	h.waitFor("chat done", 60*time.Second, func(msg tea.Msg) bool {
+		cd, ok := msg.(chatDoneMsg)
+		return ok && cd.err == nil
+	})
+	h.inspect(func(m *Model) {
+		if all := m.plainTranscript(""); !strings.Contains(all, "MODEL_USED="+chosen) {
+			t.Errorf("chat did not use the picked model %q:\n%s", chosen, all)
+		}
+	})
+}
+
+// Esc must dismiss the picker and leave the setting alone.
+func TestModelPickerEscapeChangesNothing(t *testing.T) {
+	h := newEchoHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	var before string
+	h.inspect(func(m *Model) { before = m.cfg.Agents["claude"].Model })
+
+	h.typeLine("/model claude")
+	h.waitFor("models fetched", 60*time.Second, func(msg tea.Msg) bool {
+		_, ok := msg.(modelPickMsg)
+		return ok
+	})
+	h.p.Send(tea.KeyMsg{Type: tea.KeyDown})
+	h.p.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	h.inspect(func(m *Model) {
+		if m.mode == modePicker || m.picker != nil {
+			t.Error("esc did not close the picker")
+		}
+		if got := m.cfg.Agents["claude"].Model; got != before {
+			t.Errorf("esc changed the model to %q", got)
+		}
+	})
+
+	// The input box must work again straight away.
+	h.typeLine("status")
+	h.inspect(func(m *Model) {
+		if m.mode != modeText {
+			t.Errorf("mode is %d after esc, want modeText", m.mode)
+		}
+	})
+}

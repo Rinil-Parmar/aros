@@ -76,13 +76,25 @@ func TestViewFitsTerminalExactly(t *testing.T) {
 		{70, 20},  // single column
 		{45, 12},  // cramped
 	}
-	for _, approval := range []bool{false, true} {
+	// overlay: 0 = none, 1 = approval card, 2 = picker
+	for overlay := 0; overlay <= 2; overlay++ {
 		for _, sz := range sizes {
+			approval := overlay == 1
 			m := fixtureModel(approval)
 			m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
 			populate(m)
-			if approval {
+			switch overlay {
+			case 1:
 				setApproval(m)
+			case 2:
+				var labels []pickerItem
+				for i := 0; i < 30; i++ {
+					labels = append(labels, pickerItem{
+						label: "provider/model-with-a-long-name-" + string(rune('a'+i)),
+						value: "v",
+					})
+				}
+				m.openPicker(newPicker("claude model", labels, "v", nil))
 			}
 			// Re-send the size: content changed the textarea/approval height.
 			m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
@@ -91,6 +103,9 @@ func TestViewFitsTerminalExactly(t *testing.T) {
 			if approval && !strings.Contains(stripANSI(out), "[y] yes") {
 				t.Fatalf("%dx%d: approval card did not render — the test was not exercising it", sz.w, sz.h)
 			}
+			if overlay == 2 && !strings.Contains(stripANSI(out), "claude model") {
+				t.Fatalf("%dx%d: picker did not render — the test was not exercising it", sz.w, sz.h)
+			}
 			lines := strings.Split(out, "\n")
 			// A trailing newline yields one empty final element; that is fine.
 			if n := len(lines); n > 0 && lines[n-1] == "" {
@@ -98,13 +113,13 @@ func TestViewFitsTerminalExactly(t *testing.T) {
 			}
 
 			if len(lines) != sz.h {
-				t.Errorf("%dx%d approval=%v: rendered %d lines, want %d",
-					sz.w, sz.h, approval, len(lines), sz.h)
+				t.Errorf("%dx%d overlay=%d: rendered %d lines, want %d",
+					sz.w, sz.h, overlay, len(lines), sz.h)
 			}
 			for i, line := range lines {
 				if got := lipgloss.Width(line); got != sz.w {
-					t.Errorf("%dx%d approval=%v: line %d is %d cols, want %d\n  %q",
-						sz.w, sz.h, approval, i+1, got, sz.w, stripANSI(line))
+					t.Errorf("%dx%d overlay=%d: line %d is %d cols, want %d\n  %q",
+						sz.w, sz.h, overlay, i+1, got, sz.w, stripANSI(line))
 					break // one report per size is enough
 				}
 			}

@@ -20,6 +20,14 @@ type modelListMsg struct {
 	setTo string
 }
 
+// modelPickMsg carries a model list back so the picker can be opened with it.
+type modelPickMsg struct {
+	gen       int
+	agentName string
+	list      agent.ModelList
+	scope     config.Scope
+}
+
 // modelSetMsg reports the result of verifying and applying a model.
 type modelSetMsg struct {
 	gen     int
@@ -40,20 +48,28 @@ type modelSetMsg struct {
 // Listing and setting both run off the event loop: a live query takes seconds
 // and claude's verification spawns a subprocess.
 func (m *Model) handleModelCmd(parts []string) tea.Cmd {
-	if len(parts) == 1 {
-		m.addChrome("Models in use:")
-		for _, name := range m.agentNames() {
-			ac := m.cfg.Agents[name]
-			mark := "  "
-			if !ac.Enabled {
-				mark = "· "
-			}
-			m.addChrome(fmt.Sprintf("  %s%-10s %s", mark, name, ac.Model))
+	scopeFromAll, _ := parseScope(parts[1:])
+
+	// No agent named: pick one from a list first. Nobody should have to know
+	// the exact spelling of anything to change a model.
+	if len(parts) == 1 || len(stripScopeFlags(parts[1:])) == 0 {
+		names := m.reg.Names()
+		if len(names) == 0 {
+			m.addError("no agents available")
+			return nil
 		}
-		m.addChrome("")
-		m.addChrome("/model <agent>            list what that agent supports")
-		m.addChrome("/model <agent> <text>     set it, or filter the list")
-		m.addChrome("  saved to the project config; --global for every project, --session for neither")
+		items := make([]pickerItem, 0, len(names))
+		for _, name := range names {
+			items = append(items, pickerItem{
+				label: name,
+				value: name,
+				hint:  m.cfg.Agents[name].Model,
+			})
+		}
+		m.openPicker(newPicker("choose an agent", items, m.cfg.Judge.Agent,
+			func(agentName string) tea.Cmd {
+				return m.lookupModelsForPicker(agentName, scopeFromAll)
+			}))
 		return nil
 	}
 
@@ -88,11 +104,13 @@ func (m *Model) handleModelCmd(parts []string) tea.Cmd {
 	if m.rejectIfBusy() {
 		return nil
 	}
+	// No text after the agent: open the list rather than print it.
+	if query == "" {
+		return m.lookupModelsForPicker(agentName, scope, refresh)
+	}
+
 	pr := m.newPhaseRun() // reuse the busy/cancel machinery so Esc works
 	gen := pr.gen
-	if query == "" {
-		m.addChrome(fmt.Sprintf("looking up %s models…", agentName))
-	}
 
 	return func() tea.Msg {
 		list := agent.Models(pr.ctx, ag, refresh)
@@ -115,6 +133,79 @@ func (m *Model) handleModelCmd(parts []string) tea.Cmd {
 			return modelSetMsg{gen: gen, agent: agentName, model: query, warning: warn, scope: scope}
 		}
 		return modelListMsg{gen: gen, list: list, filter: query, scope: scope}
+	}
+}
+
+// stripScopeFlags removes --global/--session so the remainder can be checked
+// for an actual agent name.
+func stripScopeFlags(args []string) []string {
+	_, rest := parseScope(args)
+	return rest
+}
+
+// lookupModelsForPicker fetches an agent's models off the event loop and opens
+// the picker when they arrive. A live query takes seconds, so the lookup is
+// cancellable and says what it is doing.
+func (m *Model) lookupModelsForPicker(agentName string, scope config.Scope, refresh ...bool) tea.Cmd {
+	ag, ok := m.reg[agentName]
+	if !ok {
+		m.addError(fmt.Sprintf("agent %q is not available here", agentName))
+		return nil
+	}
+	force := len(refresh) > 0 && refresh[0]
+
+	pr := m.newPhaseRun()
+	gen := pr.gen
+	m.addChrome(fmt.Sprintf("looking up %s models…", agentName))
+
+	return func() tea.Msg {
+		return modelPickMsg{gen: gen, agentName: agentName, list: agent.Models(pr.ctx, ag, force), scope: scope}
+	}
+}
+
+// openModelPicker turns a model list into a chooser.
+func (m *Model) openModelPicker(msg modelPickMsg) {
+	list := msg.list
+	if len(list.Models) == 0 {
+		m.addError(fmt.Sprintf("%s reported no models", msg.agentName))
+		if list.Note != "" {
+			m.addChrome("  " + list.Note)
+		}
+		return
+	}
+	items := make([]pickerItem, 0, len(list.Models))
+	for _, mdl := range list.Models {
+		items = append(items, pickerItem{label: mdl, value: mdl})
+	}
+	current := m.cfg.Agents[msg.agentName].Model
+	p := newPicker(msg.agentName+" model", items, current, func(model string) tea.Cmd {
+		return m.selectModel(msg.agentName, model, msg.scope)
+	})
+	p.footer = list.Describe() + " · ↑↓ · type to filter · enter · esc"
+	m.openPicker(p)
+}
+
+// selectModel applies a picked model, verifying it first where the agent can
+// do that cheaply.
+func (m *Model) selectModel(agentName, model string, scope config.Scope) tea.Cmd {
+	ag, ok := m.reg[agentName]
+	if !ok {
+		m.addError(fmt.Sprintf("agent %q is not available here", agentName))
+		return nil
+	}
+	v, canVerify := ag.(agent.ModelVerifier)
+	if !canVerify {
+		m.applyModel(agentName, model, "", scope)
+		return nil
+	}
+	pr := m.newPhaseRun()
+	gen := pr.gen
+	m.addChrome(fmt.Sprintf("verifying %s with %s…", model, agentName))
+	return func() tea.Msg {
+		if err := v.VerifyModel(pr.ctx, model); err != nil {
+			return modelSetMsg{gen: gen, agent: agentName, model: model, err: err, scope: scope}
+		}
+		return modelSetMsg{gen: gen, agent: agentName, model: model, scope: scope}
 	}
 }
 

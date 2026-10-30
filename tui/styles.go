@@ -184,3 +184,8 @@ var (
 	styleYouMark = lipgloss.NewStyle().Foreground(lipgloss.Color("#EC4899"))
 	styleYouName = lipgloss.NewStyle().Foreground(lipgloss.Color("#EC4899")).Bold(true)
 )
+
+var (
+	stylePickerBorder = lipgloss.NewStyle().Foreground(colorBrand)
+	stylePickerSel    = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
+)

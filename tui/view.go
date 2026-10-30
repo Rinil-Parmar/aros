@@ -39,9 +39,13 @@ func (m *Model) recalcLayout() {
 		return
 	}
 
-	approvalRows := 0
-	if m.mode == modeApproval {
-		approvalRows = 3
+	// One overlay at a time sits between the columns and the input box.
+	overlayRows := 0
+	switch {
+	case m.mode == modeApproval:
+		overlayRows = 3
+	case m.mode == modePicker && m.picker != nil:
+		overlayRows = m.picker.rows()
 	}
 	taH := m.textarea.Height()
 	if taH < 1 {
@@ -49,7 +53,7 @@ func (m *Model) recalcLayout() {
 	}
 
 	// Rows the two columns may occupy, border included.
-	m.colH = m.height - 1 - approvalRows - (taH + 2) - 1
+	m.colH = m.height - 1 - overlayRows - (taH + 2) - 1
 	if m.colH < 3 {
 		m.colH = 3
 	}
@@ -88,8 +92,11 @@ func (m *Model) View() string {
 	out.WriteString(m.renderHeader())
 	out.WriteString("\n")
 	out.WriteString(m.renderColumns())
-	if m.mode == modeApproval {
+	switch {
+	case m.mode == modeApproval:
 		out.WriteString(m.renderApprovalCard())
+	case m.mode == modePicker && m.picker != nil:
+		out.WriteString(m.renderPicker())
 	}
 	out.WriteString(m.renderInputBox())
 	out.WriteString(m.renderStatusBar())

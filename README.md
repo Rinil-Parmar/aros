@@ -127,7 +127,8 @@ clipboard, or `/export notes.md` to write it to a file.
 |---|---|
 | `Enter` | Send message / confirm |
 | `y` / `n` | Answer approval prompts (no Enter needed) |
-| `Esc` / `Ctrl+G` | Cancel whatever is running and return to idle |
+| `Esc` / `Ctrl+G` | Cancel whatever is running, or close a picker |
+| `↑↓` / `Tab` | Move in a picker; type to filter, `Enter` to select |
 | `Ctrl+Y` | Copy the whole chat to the clipboard (OSC 52 — works over SSH) |
 | `Ctrl+O` | Toggle mouse reporting. Turn it **off** to select and copy text with the mouse |
 | `Ctrl+H` | Show help |
@@ -376,8 +377,26 @@ never claims to be complete:
 | **claude** | no list command, so documented aliases, labelled *"not an exhaustive list"* | **free** — rejects an unknown model with no API call and no cost |
 | **copilot** | no list command, model set depends on your subscription | none; `auto` always works |
 
-In the TUI, `/model` shows what each agent is using, `/model opencode` lists,
-and `/model opencode gpt-5.4` either sets it (exact name) or filters. Setting a
+In the TUI you pick from a list rather than typing an exact name — model names
+are long, numerous and unguessable, so requiring the exact string made changing
+a model harder than reading the list it came from:
+
+```
+/model                → choose an agent, then its model
+/model opencode       → straight to opencode's models
+```
+
+```
+╭─ opencode model ───────────────────────────────────────────────── 11/11 ╮
+│   openai/gpt-5.4                                                        │
+│ ▸ openai/gpt-5.4-mini                                        ● in use   │
+│   openai/gpt-5.4-mini-fast                                              │
+╰─ 75 models, cached 2m ago · ↑↓ · type to filter · enter · esc ──────────╯
+```
+
+`↑↓` moves (wrapping at both ends), typing filters, `enter` selects, `esc`
+cancels and changes nothing. The list opens on the model already in effect.
+`/model opencode gpt-5.4-mini` still works if you know the name. Setting a
 model is checked first, so a typo surfaces now rather than mid-phase:
 
 ```
