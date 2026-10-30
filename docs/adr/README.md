@@ -30,6 +30,7 @@ old one superseded.
 | [0014](0014-generation-gating-and-universal-cancel.md) | Gate UI messages by generation; one universal cancel key | Accepted | 2026-09-23 |
 | [0015](0015-v2-will-be-tui-only.md) | v2 will be TUI-only, dropping the Cobra CLI | **Proposed** | 2026-05-04 |
 | [0016](0016-no-file-level-conflict-protection.md) | Parallel tasks share one working tree with no conflict protection | Accepted *(known limitation)* | 2026-09-25 |
+| [0017](0017-git-commits-behind-an-approval-gate-never-push.md) | Record agent changes as git commits behind an approval gate; never push | Accepted | 2026-10-30 |
 
 ## Reading order
 

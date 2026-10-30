@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,6 +24,9 @@ if [[ "$prompt" == *"Break this plan into concrete tasks."* ]]; then
 {"type":"result","result":"[{\"id\":\"task-001\",\"title\":\"Core\",\"description\":\"Implement core.\",\"assigned_to\":\"claude\",\"dependencies\":[]},{\"id\":\"task-002\",\"title\":\"Tests\",\"description\":\"Add tests.\",\"assigned_to\":\"claude\",\"dependencies\":[\"task-001\"]},{\"id\":\"task-003\",\"title\":\"Docs\",\"description\":\"Write docs.\",\"assigned_to\":\"claude\",\"dependencies\":[]}]","is_error":false}
 JSON
 elif [[ "$prompt" == *"You are working on task"* ]]; then
+  # Write a real file so the git commit gate has something to show.
+  id="$(printf '%s' "$prompt" | sed -n 's/.*You are working on task \[\([^]]*\)\].*/\1/p' | head -1)"
+  printf 'output of %s\n' "${id:-task}" > "out-${id:-task}.txt"
   cat <<'JSON'
 {"type":"result","result":"Task implemented.","is_error":false}
 JSON
@@ -734,5 +738,136 @@ func TestUseSessionDoesNotSwitchOnUnreadableState(t *testing.T) {
 	}
 	if after != before {
 		t.Fatalf("active session moved to the corrupt one: %s → %s", before, after)
+	}
+}
+
+// ── git commit gate ────────────────────────────────────────────────────────────
+
+func initGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.name", "Test User"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "commit.gpgsign", "false"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "initial"}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+func gitLog(t *testing.T, dir, format string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "log", "-1", "--format="+format).Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// The work phase must put the agents' file changes behind an approval card,
+// and commit only on yes — with Aros's own state left out of the history.
+func TestWorkCommitGateApproved(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	dir := mustCwd(t)
+	initGitRepo(t, dir)
+
+	h.startProject()
+	h.typeLine("plan build a widget")
+	h.waitFor("plan approval", 30*time.Second, isApproval)
+	h.typeLine("y")
+	h.waitFor("plan_done", 30*time.Second, phaseDone("plan_done"))
+	h.typeLine("divide")
+	h.waitFor("divide approval", 30*time.Second, isApproval)
+	h.typeLine("y")
+	h.waitFor("divide_done", 30*time.Second, phaseDone("divide_done"))
+
+	h.typeLine("work")
+	h.waitFor("commit gate", 60*time.Second, func(m tea.Msg) bool {
+		a, ok := m.(approvalMsg)
+		return ok && strings.Contains(a.question, "Commit")
+	})
+	// The phase must still be busy while the gate is up — the UI stays locked.
+	h.inspect(func(m *Model) {
+		if !m.busy {
+			t.Error("phase released busy before the commit gate was answered")
+		}
+	})
+	h.typeLine("y")
+	h.waitFor("work_done", 60*time.Second, phaseDone("work_done"))
+
+	if subject := gitLog(t, dir, "%s"); !strings.HasPrefix(subject, "aros: demo") {
+		t.Fatalf("commit subject wrong: %q", subject)
+	}
+	if body := gitLog(t, dir, "%b"); !strings.Contains(body, "(claude)") {
+		t.Errorf("commit body should credit the agent: %q", body)
+	}
+	if full := gitLog(t, dir, "%an|%B"); strings.Contains(strings.ToLower(full), "co-authored") {
+		t.Errorf("commit must carry no trailers: %q", full)
+	}
+
+	files, err := exec.Command("git", "-C", dir, "show", "--name-only", "--format=", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(files), ".aros") {
+		t.Fatalf("Aros state was committed into the project:\n%s", files)
+	}
+	if !strings.Contains(string(files), "out-task-") {
+		t.Fatalf("agent output files missing from the commit:\n%s", files)
+	}
+}
+
+// Declining the gate must leave the changes in the tree, uncommitted.
+func TestWorkCommitGateDeclined(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	dir := mustCwd(t)
+	initGitRepo(t, dir)
+	before := gitLog(t, dir, "%H")
+
+	h.startProject()
+	h.typeLine("plan build a widget")
+	h.waitFor("plan approval", 30*time.Second, isApproval)
+	h.typeLine("y")
+	h.waitFor("plan_done", 30*time.Second, phaseDone("plan_done"))
+	h.typeLine("divide")
+	h.waitFor("divide approval", 30*time.Second, isApproval)
+	h.typeLine("y")
+	h.waitFor("divide_done", 30*time.Second, phaseDone("divide_done"))
+
+	h.typeLine("work")
+	h.waitFor("commit gate", 60*time.Second, func(m tea.Msg) bool {
+		a, ok := m.(approvalMsg)
+		return ok && strings.Contains(a.question, "Commit")
+	})
+	h.typeLine("n")
+	h.waitFor("work_done", 60*time.Second, phaseDone("work_done"))
+
+	if after := gitLog(t, dir, "%H"); after != before {
+		t.Fatalf("declining the gate still committed: %s → %s", before, after)
+	}
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "out-task-") {
+		t.Fatalf("agent changes should still be in the tree:\n%s", out)
+	}
+	if strings.Contains(string(out), ".aros") {
+		t.Errorf(".aros should be excluded from status:\n%s", out)
 	}
 }

@@ -18,6 +18,7 @@ type phaseRun struct {
 	reg     agent.Registry
 	mem     *memory.SecondMem
 	arosDir string
+	cwd     string             // project root (the git working tree)
 	project state.ProjectState // copy
 }
 

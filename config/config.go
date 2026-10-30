@@ -13,6 +13,28 @@ type Config struct {
 	Agents    map[string]AgentConfig `mapstructure:"agents"`
 	SecondMem SecondMemConfig        `mapstructure:"secondmem"`
 	Work      WorkConfig             `mapstructure:"work"`
+	Git       GitConfig              `mapstructure:"git"`
+}
+
+// GitConfig controls whether Aros records agent changes as commits.
+// Aros never pushes — see package git.
+type GitConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Commit is "ask" (approval gate, default), "auto" or "off".
+	Commit string `mapstructure:"commit"`
+}
+
+// CommitMode returns the normalized commit mode, or "off" when git is disabled.
+func (c *Config) CommitMode() string {
+	if !c.Git.Enabled {
+		return "off"
+	}
+	switch c.Git.Commit {
+	case "auto", "off":
+		return c.Git.Commit
+	default:
+		return "ask"
+	}
 }
 
 type JudgeConfig struct {
@@ -116,6 +138,10 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("work.max_concurrent", 2)
 	v.SetDefault("work.agent_timeout_seconds", 300)
+
+	// Record what the agents changed, behind an approval gate. Aros never pushes.
+	v.SetDefault("git.enabled", true)
+	v.SetDefault("git.commit", "ask")
 }
 
 // normalize clamps nonsensical values so callers never have to re-check them.
@@ -128,6 +154,11 @@ func (c *Config) normalize() {
 	}
 	if c.Judge.Agent == "" {
 		c.Judge.Agent = "claude"
+	}
+	switch c.Git.Commit {
+	case "ask", "auto", "off":
+	default:
+		c.Git.Commit = "ask"
 	}
 	for name, ac := range c.Agents {
 		switch ac.Dense {

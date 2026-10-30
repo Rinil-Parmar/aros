@@ -114,6 +114,7 @@ clipboard, or `/export notes.md` to write it to a file.
 | `/agents` | List all configured agents |
 | `/session <new|list|use|rm>` | Manage sessions |
 | `/phase <phase>` | Set phase (init\|plan\|divide\|work\|done) |
+| `/commit [--force]` | Commit the agents' changes (asks first; `--force` skips the prompt) |
 | `/copy [last]` | Copy the chat (or just the last agent reply) to the clipboard |
 | `/export [file]` | Write the chat to a markdown file |
 | `help` | Show all commands |
@@ -212,6 +213,25 @@ aros work
 ```
 
 Tasks execute in dependency order, up to `max_concurrent` agents in parallel. Each agent gets context from its dependencies and from secondmem. If an agent hits an ambiguous decision, it outputs `<<AROS_HUMAN>>` and pauses for your input.
+
+Aros records what the agents changed as a **git commit**, behind an approval
+gate — it shows you the changed files and commits only if you say yes. **Aros
+never pushes**: a local commit is private and undone with `git reset`, while a
+push is outward-facing and cannot be cleanly retracted, so publishing stays
+something you type yourself.
+
+```toml
+[git]
+enabled = true     # false = never touch git
+commit  = "ask"    # "ask" (approval gate), "auto" (commit silently), "off"
+```
+
+The commit is authored by whoever your `git config` says, carries no trailers,
+and lists the completed tasks with the agent that did each one. Aros's own
+`.aros/` state is added to `.git/info/exclude`, so session files never enter
+your project's history and never appear in `git status`. Declined the gate?
+`aros commit` (or `/commit` in the TUI) records it later. Not a git repo? The
+git layer is skipped with a one-line note.
 
 > **⚠ Concurrent writes are not protected.** Parallel agents share one working
 > tree with no locking or isolation. If two tasks edit the same file, one

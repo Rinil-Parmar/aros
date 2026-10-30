@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	gitrepo "github.com/Rinil-Parmar/aros/git"
 	"github.com/Rinil-Parmar/aros/state"
 	"github.com/spf13/cobra"
 )
@@ -65,6 +66,12 @@ func runInit(cmd *cobra.Command, args []string) error {
 	cfgPath := filepath.Join(arosDir, "config.toml")
 	if err := os.WriteFile(cfgPath, []byte(defaultConfig), 0644); err != nil {
 		return fmt.Errorf("writing project config: %w", err)
+	}
+
+	// If this is a git repo, teach it to ignore .aros straight away so the
+	// user's next `git status` is clean.
+	if _, ok := gitrepo.Open(cwd); ok {
+		fmt.Println("  Git:    .aros/ added to .git/info/exclude (session state stays local)")
 	}
 
 	fmt.Printf("Initialized Aros project: %q\n", projectName)

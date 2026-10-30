@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Rinil-Parmar/aros/agent"
+	gitrepo "github.com/Rinil-Parmar/aros/git"
 	"github.com/Rinil-Parmar/aros/state"
 	"github.com/Rinil-Parmar/aros/worker"
 	"golang.org/x/sync/errgroup"
@@ -317,6 +318,14 @@ func runWork(pr phaseRun) {
 		return
 	}
 
+	repo, hasRepo := gitrepo.Open(pr.cwd)
+	commitMode := pr.cfg.CommitMode()
+	if hasRepo && commitMode != "off" {
+		if clean, err := repo.IsClean(); err == nil && !clean {
+			send(streamLineMsg{gen: pr.gen, agent: "aros", line: "warning: the working tree already has uncommitted changes — the commit at the end will include them too."})
+		}
+	}
+
 	// Each message gets its own copy: the model keeps the pointer it receives.
 	started := pr.project
 	started.Phase = state.PhaseWork
@@ -372,17 +381,77 @@ func runWork(pr phaseRun) {
 
 	res, err := worker.Run(pr.ctx, manifest, pr.arosDir, pr.reg, pr.mem, opts, hooks)
 	send(manifestChangedMsg{})
-	if err != nil {
-		if errors.Is(err, worker.ErrTasksBlocked) {
-			send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("%d of %d done, %d blocked — fix the blockers (see status) and type 'work' to retry them", res.Done, res.Total, res.Blocked)})
+
+	// finish reports how the run ended. It is deferred until after the commit
+	// gate so the phase stays busy — and the UI stays locked — while the user
+	// decides whether to record the changes.
+	finish := func() {
+		if err != nil {
+			if errors.Is(err, worker.ErrTasksBlocked) {
+				send(phaseResultMsg{gen: pr.gen, err: fmt.Errorf("%d of %d done, %d blocked — fix the blockers (see status) and type 'work' to retry them", res.Done, res.Total, res.Blocked)})
+				return
+			}
+			send(phaseResultMsg{gen: pr.gen, err: err})
 			return
 		}
-		send(phaseResultMsg{gen: pr.gen, err: err})
+		finished := pr.project
+		finished.Phase = state.PhaseDone
+		_ = state.SaveState(pr.arosDir, &finished)
+		send(phaseResultMsg{gen: pr.gen, phase: "work_done", project: &finished})
+	}
+
+	if !hasRepo || commitMode == "off" {
+		finish()
+		return
+	}
+	commitChanges(pr, repo, commitMode, manifest.Tasks, finish)
+}
+
+// commitChanges records what the agents changed. With mode "ask" it puts an
+// approval card up first and only commits on yes; `then` runs either way.
+// Aros never pushes — publishing stays the human's decision.
+func commitChanges(pr phaseRun, repo *gitrepo.Repo, mode string, tasks []state.Task, then func()) {
+	changes, err := repo.ChangedFiles()
+	if err != nil {
+		send(streamLineMsg{gen: pr.gen, agent: "aros", line: "warning: could not read git status: " + err.Error()})
+		then()
+		return
+	}
+	if len(changes) == 0 {
+		send(streamLineMsg{gen: pr.gen, agent: "aros", line: "No file changes to commit — the agents reported success but changed nothing."})
+		then()
 		return
 	}
 
-	finished := pr.project
-	finished.Phase = state.PhaseDone
-	_ = state.SaveState(pr.arosDir, &finished)
-	send(phaseResultMsg{gen: pr.gen, phase: "work_done", project: &finished})
+	for _, line := range gitrepo.Summarize(changes, 15) {
+		send(streamLineMsg{gen: pr.gen, agent: "aros", line: line})
+	}
+
+	doCommit := func() {
+		sha, err := repo.CommitAll(gitrepo.CommitMessage(pr.project.ProjectName, tasks))
+		switch {
+		case errors.Is(err, gitrepo.ErrNothingToCommit):
+			send(streamLineMsg{gen: pr.gen, agent: "aros", line: "Nothing to commit."})
+		case err != nil:
+			send(streamLineMsg{gen: pr.gen, agent: "aros", line: "warning: commit failed: " + err.Error()})
+		default:
+			send(streamLineMsg{gen: pr.gen, agent: "aros", line: fmt.Sprintf("Committed %s on %s — not pushed. Run `git push` when you are ready.", sha, repo.Branch())})
+		}
+		then()
+	}
+
+	if mode == "auto" {
+		doCommit()
+		return
+	}
+
+	send(approvalMsg{
+		gen:      pr.gen,
+		question: fmt.Sprintf("Commit %d changed file(s)?", len(changes)),
+		onYes:    doCommit,
+		onNo: func() {
+			send(streamLineMsg{gen: pr.gen, agent: "aros", line: "Left uncommitted. Review with `git diff`, then type /commit or commit yourself."})
+			then()
+		},
+	})
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Rinil-Parmar/aros/agent"
 	"github.com/Rinil-Parmar/aros/config"
+	gitrepo "github.com/Rinil-Parmar/aros/git"
 	"github.com/Rinil-Parmar/aros/memory"
 	"github.com/Rinil-Parmar/aros/state"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -540,7 +541,7 @@ func (m *Model) newPhaseRun() phaseRun {
 	m.phaseCancel = cancel
 	m.phaseGen = m.nextGen()
 	m.busy = true
-	pr := phaseRun{gen: m.phaseGen, ctx: ctx, cfg: m.cfg, reg: m.reg, mem: m.mem, arosDir: m.arosDir}
+	pr := phaseRun{gen: m.phaseGen, ctx: ctx, cfg: m.cfg, reg: m.reg, mem: m.mem, arosDir: m.arosDir, cwd: m.cwd}
 	if m.project != nil {
 		pr.project = *m.project
 	}
@@ -715,6 +716,34 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 	case "/clear":
 		m.messages = nil
 		m.refreshViewport()
+
+	case "/commit":
+		if m.rejectIfBusy() {
+			return nil
+		}
+		if m.project == nil {
+			m.addError("no project loaded")
+			return nil
+		}
+		repo, ok := gitrepo.Open(m.cwd)
+		if !ok {
+			m.addError(m.cwd + " is not a git repository")
+			return nil
+		}
+		pr := m.newPhaseRun()
+		tasks := []state.Task{}
+		if m.manifest != nil {
+			tasks = m.manifest.Tasks
+		}
+		mode := "ask"
+		if hasForceFlag(parts) {
+			mode = "auto"
+		}
+		safeGo(pr.gen, func() {
+			commitChanges(pr, repo, mode, tasks, func() {
+				send(phaseResultMsg{gen: pr.gen})
+			})
+		})
 
 	case "/copy":
 		arg := ""
@@ -980,6 +1009,7 @@ func (m *Model) showHelp() {
 		"  /agents                    show all configured agents",
 		"  /session <new|list|use|rm>  manage sessions",
 		"  /phase <phase> [--force]    set phase (init|plan|divide|work|done); --force aborts a running phase",
+		"  /commit [--force]          commit the agents' changes (asks first; never pushes)",
 		"  /copy [last|all]           copy chat to clipboard (last agent reply, or all)",
 		"  /export [file]             write the chat to a markdown file",
 		"  /clear                     clear chat history",
