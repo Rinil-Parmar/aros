@@ -871,3 +871,180 @@ func TestWorkCommitGateDeclined(t *testing.T) {
 		t.Errorf(".aros should be excluded from status:\n%s", out)
 	}
 }
+
+// ── chat persistence ───────────────────────────────────────────────────────────
+
+// restart tears the program down and brings a fresh Model up in the same
+// directory, which is what quitting and relaunching aros actually does.
+func (h *harness) restart() *harness {
+	h.t.Helper()
+	h.p.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	select {
+	case <-h.done:
+	case <-time.After(10 * time.Second):
+		h.t.Fatal("program did not exit before restart")
+	}
+
+	n := &harness{t: h.t, wake: make(chan struct{}, 64), done: make(chan error, 1)}
+	n.m = New("")
+	n.p = tea.NewProgram(n.m,
+		tea.WithInput(nil), tea.WithoutRenderer(), tea.WithoutSignalHandler(),
+		tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
+			if pm, ok := msg.(probeMsg); ok {
+				pm.fn(n.m)
+				close(pm.done)
+			}
+			n.mu.Lock()
+			n.seen = append(n.seen, msg)
+			n.mu.Unlock()
+			select {
+			case n.wake <- struct{}{}:
+			default:
+			}
+			return msg
+		}),
+	)
+	SetProgram(n.p)
+	go func() {
+		_, err := n.p.Run()
+		n.done <- err
+	}()
+	n.p.Send(tea.WindowSizeMsg{Width: 120, Height: 40})
+	return n
+}
+
+// What the user asked for: reopen the session and see the conversation and
+// where the work left off.
+func TestChatSurvivesRestart(t *testing.T) {
+	h := newHarness(t)
+	// restart() shuts a harness down, so only the last one may be quit.
+	cur := h
+	defer func() { cur.quit() }()
+	h.startProject()
+
+	h.typeLine("what should I build first?")
+	h.waitFor("chat done", 20*time.Second, func(m tea.Msg) bool {
+		cd, ok := m.(chatDoneMsg)
+		return ok && cd.err == nil
+	})
+	h.typeLine("plan a widget")
+	h.waitFor("plan approval", 30*time.Second, isApproval)
+	h.typeLine("y")
+	h.waitFor("plan_done", 30*time.Second, phaseDone("plan_done"))
+
+	// Restart in the same directory.
+	h2 := h.restart()
+	cur = h2
+	h2.waitFor("bootstrap", 15*time.Second, func(m tea.Msg) bool { _, ok := m.(bootstrapMsg); return ok })
+
+	h2.inspect(func(m *Model) {
+		if m.project == nil {
+			t.Fatal("project not reloaded")
+		}
+		all := m.plainTranscript("")
+		for _, want := range []string{
+			"what should I build first?", // the question survived
+			"Chat answer",                // the judge's reply survived
+			"plan a widget",              // the command survived
+			"Plan approved",              // the phase result survived
+		} {
+			if !strings.Contains(all, want) {
+				t.Errorf("replayed chat is missing %q\n--- transcript ---\n%s", want, all)
+			}
+		}
+		// And it must say where we are now.
+		if !strings.Contains(all, "resumed") {
+			t.Error("no resume marker after replay")
+		}
+		if !strings.Contains(all, "phase plan") {
+			t.Error("resumed view does not show the phase")
+		}
+		if m.replaying {
+			t.Error("replaying flag left set")
+		}
+	})
+
+	// A replayed conversation must not be written back to the log, or the
+	// history would double on every restart.
+	before := h2.chatLen(t)
+	h3 := h2.restart()
+	cur = h3
+	h3.waitFor("bootstrap", 15*time.Second, func(m tea.Msg) bool { _, ok := m.(bootstrapMsg); return ok })
+	if after := h3.chatLen(t); after > before+8 { // +8 allows the new session's own welcome lines
+		t.Fatalf("chat log grew from %d to %d entries across a restart — the replay is being re-logged", before, after)
+	}
+}
+
+func (h *harness) chatLen(t *testing.T) int {
+	t.Helper()
+	entries, err := state.LoadChat(filepath.Join(mustCwd(t), ".aros"), 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(entries)
+}
+
+// Each session keeps its own conversation.
+func TestChatIsolatedPerSessionInTUI(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	h.typeLine("first session message")
+	h.waitFor("chat done", 20*time.Second, func(m tea.Msg) bool {
+		cd, ok := m.(chatDoneMsg)
+		return ok && cd.err == nil
+	})
+
+	h.typeLine("/session new second")
+	h.inspect(func(m *Model) {
+		all := m.plainTranscript("")
+		if strings.Contains(all, "first session message") {
+			t.Errorf("the new session shows the old conversation:\n%s", all)
+		}
+	})
+
+	// Switching back brings the original conversation with it.
+	var firstID string
+	h.inspect(func(m *Model) {
+		sessions, err := state.ListSessions(m.arosDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range sessions {
+			if s.Name == "demo" {
+				firstID = s.ID
+			}
+		}
+	})
+	if firstID == "" {
+		t.Fatal("original session not found")
+	}
+	h.typeLine("/session use " + firstID)
+	h.inspect(func(m *Model) {
+		if all := m.plainTranscript(""); !strings.Contains(all, "first session message") {
+			t.Errorf("switching back did not restore the conversation:\n%s", all)
+		}
+	})
+}
+
+// /clear must clear the saved log too, or the history reappears on restart.
+func TestClearAlsoClearsSavedChat(t *testing.T) {
+	h := newHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	h.typeLine("something memorable")
+	h.waitFor("chat done", 20*time.Second, func(m tea.Msg) bool {
+		cd, ok := m.(chatDoneMsg)
+		return ok && cd.err == nil
+	})
+	if h.chatLen(t) == 0 {
+		t.Fatal("nothing was logged")
+	}
+	h.typeLine("/clear")
+	h.inspect(func(m *Model) {})
+	if n := h.chatLen(t); n != 0 {
+		t.Fatalf("/clear left %d entries in the saved log", n)
+	}
+}

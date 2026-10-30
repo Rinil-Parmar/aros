@@ -373,10 +373,38 @@ All state lives in `.aros/` inside your project directory:
     └── <session-id>/
         ├── session.json    # session metadata
         ├── state.json      # current phase, task, approved plan
-        └── manifest.json   # task list with assignments and statuses
+        ├── manifest.json   # task list with assignments and statuses
+        └── chat.jsonl      # the TUI conversation, append-only
 ```
 
 State transitions are forward-only. Use `--force` to re-run a phase, or `aros phase <phase>` to jump anywhere. In the TUI, `/phase <phase> --force` also aborts a running phase (agent subprocesses are killed).
+
+---
+
+## Session history
+
+The TUI conversation is saved to `chat.jsonl` inside the active session, so
+reopening a session shows what you discussed with the judge and where the work
+stopped:
+
+```
+── resumed · 42 earlier message(s) above ──
+paramrut-api · phase plan
+next:  divide    (break the approved plan into tasks)
+```
+
+- **Per session.** `/session use <id>` swaps the conversation over with it; a
+  new session starts clean.
+- **Append-only.** A streamed reply is stored line by line and merged back into
+  one block on replay, so nothing is rewritten as output arrives. A torn final
+  line from a crash costs that line, not the history.
+- **Bounded.** The last 500 entries are replayed, and the file is compacted to
+  that tail once it passes 2 MiB.
+- `/clear` (and `Ctrl+K`) clears the view **and** the saved log.
+- The CLI does not write it — there is no conversation to record there.
+
+Everything else was already durable: `state.json` keeps the phase and approved
+plan, `manifest.json` keeps every task's full output.
 
 ---
 

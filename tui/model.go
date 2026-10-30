@@ -78,6 +78,13 @@ type Model struct {
 	// second line of input cannot create a duplicate project.
 	initializing bool
 
+	// replaying is true while a saved conversation is being pushed back into
+	// the view, so the replay is not written to the log again.
+	replaying bool
+	// chatLogBroken records that persistence failed, so the warning is shown
+	// once instead of on every message.
+	chatLogBroken bool
+
 	// mouseOff is true when mouse reporting has been turned off so the
 	// terminal's own click-drag selection works and chat text can be copied
 	// with the mouse. Scroll-wheel scrolling is unavailable while it is off.
@@ -293,6 +300,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+k":
 			m.messages = nil
+			_ = state.ClearChat(m.arosDir)
 			m.refreshViewport()
 			return m, nil
 		case "ctrl+s":
@@ -352,6 +360,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionID = msg.sessionID
 		m.sessionName = msg.sessionName
 		m.reloadManifest()
+		m.replayChat() // show where the last session left off
 		m.showWelcome()
 		if msg.err != nil {
 			m.addError(msg.err.Error())
@@ -715,6 +724,9 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 
 	case "/clear":
 		m.messages = nil
+		if err := state.ClearChat(m.arosDir); err != nil {
+			m.addError("could not clear the saved chat: " + err.Error())
+		}
 		m.refreshViewport()
 
 	case "/commit":
@@ -1046,7 +1058,7 @@ func (m *Model) showHelp() {
 		"  /commit [--force]          commit the agents' changes (asks first; never pushes)",
 		"  /copy [last|all]           copy chat to clipboard (last agent reply, or all)",
 		"  /export [file]             write the chat to a markdown file",
-		"  /clear                     clear chat history",
+		"  /clear                     clear the chat, here and in the saved log",
 		"  /help, /quit",
 		"",
 		"Esc or Ctrl+G        cancel whatever is running and return to idle",
@@ -1235,7 +1247,10 @@ func (m *Model) createSession(name string) error {
 	m.sessionID = meta.ID
 	m.sessionName = meta.Name
 	m.reloadManifest()
+	m.messages = nil // a fresh session starts with a clean conversation
+	m.chatLogBroken = false
 	m.addSuccess(fmt.Sprintf("Session created → %s (%s)", meta.Name, meta.ID))
+	m.addSystem(m.nextStepHint())
 	return nil
 }
 
@@ -1260,7 +1275,12 @@ func (m *Model) useSession(id string) error {
 	}
 	m.project = s
 	m.reloadManifest()
+	// Each session owns its conversation, so swap the view over to it.
+	m.messages = nil
+	m.replayChat()
 	m.addSuccess(fmt.Sprintf("Active session → %s", id))
+	m.addSystem(fmt.Sprintf("%s · phase %s", s.ProjectName, s.Phase))
+	m.addSystem(m.nextStepHint())
 	return nil
 }
 
@@ -1391,11 +1411,32 @@ func (m *Model) showStatus() {
 
 func (m *Model) addSystem(text string) {
 	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Body: text})
+	m.persist(state.ChatSystem, "", "", text)
 	m.refreshViewport()
+}
+
+// persist appends one entry to the session's conversation log so reopening the
+// session shows where the work left off. Best-effort: a logging failure must
+// never interrupt the session, so it warns once and then stays quiet.
+func (m *Model) persist(kind, agent, model, body string) {
+	if m.replaying || m.chatLogBroken || m.arosDir == "" || m.project == nil {
+		return
+	}
+	err := state.AppendChat(m.arosDir, state.ChatEntry{
+		Kind: kind, Agent: agent, Model: model, Body: body,
+	})
+	if err != nil {
+		m.chatLogBroken = true
+		m.messages = append(m.messages, ChatMessage{
+			Kind: kindSystem,
+			Body: "warning: chat history will not be saved for this session: " + err.Error(),
+		})
+	}
 }
 
 func (m *Model) addAgent(name, text string) {
 	m.messages = append(m.messages, ChatMessage{Kind: kindAgent, AgentName: name, Body: text})
+	m.persist(state.ChatAgent, name, "", text)
 	m.refreshViewport()
 }
 
@@ -1404,6 +1445,9 @@ func (m *Model) appendStream(name, line string) {
 		last := &m.messages[len(m.messages)-1]
 		if last.Kind == kindAgent && last.AgentName == name {
 			last.Body += "\n" + line // raw append — indent added at render time
+			// Each line is logged separately; replay merges them back with
+			// this same function, so nothing has to be rewritten in place.
+			m.persist(state.ChatAgent, name, "", line)
 			m.refreshViewport()
 			return
 		}
@@ -1413,17 +1457,49 @@ func (m *Model) appendStream(name, line string) {
 
 func (m *Model) addHuman(text string) {
 	m.messages = append(m.messages, ChatMessage{Kind: kindHuman, Body: text})
+	m.persist(state.ChatHuman, "", "", text)
 	m.refreshViewport()
 }
 
 func (m *Model) addError(text string) {
 	m.messages = append(m.messages, ChatMessage{Kind: kindError, Body: text})
+	m.persist(state.ChatError, "", "", text)
 	m.refreshViewport()
 }
 
 func (m *Model) addSuccess(text string) {
 	m.messages = append(m.messages, ChatMessage{Kind: kindSuccess, Body: text})
+	m.persist(state.ChatSuccess, "", "", text)
 	m.refreshViewport()
+}
+
+// replayChat pushes a saved conversation back into the view. Entries go through
+// the normal add/append helpers so a streamed reply merges into one block and
+// renders exactly as it did live.
+func (m *Model) replayChat() {
+	entries, err := state.LoadChat(m.arosDir, state.MaxChatReplay)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	m.replaying = true
+	defer func() { m.replaying = false }()
+
+	for _, e := range entries {
+		switch e.Kind {
+		case state.ChatHuman:
+			m.addHuman(e.Body)
+		case state.ChatAgent:
+			m.appendStream(e.Agent, e.Body)
+		case state.ChatError:
+			m.addError(e.Body)
+		case state.ChatSuccess:
+			m.addSuccess(e.Body)
+		default:
+			m.addSystem(e.Body)
+		}
+	}
+	m.addSystem("")
+	m.addSystem(fmt.Sprintf("── resumed · %d earlier message(s) above ──", len(entries)))
 }
 
 // refreshViewport re-renders all messages with the current panel width and updates the viewport.
