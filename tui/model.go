@@ -943,17 +943,15 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) {
 		m.showHelp()
 	case "plan_done":
 		m.addSuccess("Plan approved.")
-		m.addSystem("  → type: divide    (break plan into agent tasks)")
+		m.addSystem(m.nextStepHint())
 		m.clearActivity()
 	case "divide_done":
 		m.addSuccess("Tasks assigned.")
-		m.addSystem("  → type: work    (execute all tasks)")
+		m.addSystem(m.nextStepHint())
 		m.clearActivity()
 	case "work_done":
-		m.addSuccess("All tasks complete!")
-		m.addSystem("  → status                    review results")
-		m.addSystem("  → /session new <name>       start a new project")
-		m.addSystem("  → /phase init               reset this session")
+		m.addSuccess("All tasks complete.")
+		m.addSystem(m.nextStepHint())
 		m.clearActivity()
 	default:
 		m.clearActivity()
@@ -977,21 +975,57 @@ func (m *Model) showWelcome() {
   ██║  ██║██║  ██║╚██████╔╝███████║    ╚██████╗███████╗██║
   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝     ╚═════╝╚══════╝╚═╝`
 
-	// Store as kindBanner so refreshViewport re-renders it with current width on resize
-	m.messages = append(m.messages, ChatMessage{Kind: kindBanner, Body: bannerText})
-	m.addSystem("Multi-agent AI orchestrator  •  v0.1.0")
-	m.addSystem(strings.Repeat("─", min(w-2, 65)))
+	// On a short terminal the six-line banner costs a quarter of the view, so
+	// show a one-line brand instead.
+	if m.height >= 28 || m.height == 0 {
+		// kindBanner so refreshViewport re-centres it on resize.
+		m.messages = append(m.messages, ChatMessage{Kind: kindBanner, Body: bannerText})
+		m.addSystem("Multi-agent AI orchestrator  ·  v0.1.0")
+	} else {
+		m.addSystem("◆ AROS  ·  multi-agent orchestrator  ·  v0.1.0")
+	}
+	m.addSystem(strings.Repeat("─", max(10, w-6)))
 
 	if m.project != nil {
-		m.addSystem(fmt.Sprintf("Resuming: %s  [phase: %s]", m.project.ProjectName, m.project.Phase))
-		m.showAgents()
-		m.showHelp()
+		// Show where we are and what to do next — not the manual. Sixteen
+		// lines of help on every start buries the actual state.
+		m.addSystem(fmt.Sprintf("%s · phase %s", m.project.ProjectName, m.project.Phase))
+		if m.manifest != nil && len(m.manifest.Tasks) > 0 {
+			if p := m.taskProgress(); p != "" {
+				m.addSystem(p)
+			}
+		} else if m.project.Task != "" {
+			m.addSystem("task: " + truncate(m.project.Task, 72))
+		}
+		m.addSystem("")
+		m.addSystem(m.nextStepHint())
+		m.addSystem("/help for all commands")
 		m.setMode(modeText, "")
 		return
 	}
 
-	m.addSystem("No project found here. Enter a project name to start:")
+	m.addSystem("No project here yet. Type a name to start one:")
 	m.setMode(modeText, "project name")
+}
+
+// nextStepHint names the one command that makes sense in the current phase.
+func (m *Model) nextStepHint() string {
+	if m.project == nil {
+		return "type a project name to begin"
+	}
+	switch m.project.Phase {
+	case state.PhaseInit:
+		return "next:  plan <what you want to build>"
+	case state.PhasePlan:
+		return "next:  divide    (break the approved plan into tasks)"
+	case state.PhaseDivide:
+		return "next:  work      (run the tasks)"
+	case state.PhaseWork:
+		return "next:  work      (resume — retries anything blocked)"
+	case state.PhaseDone:
+		return "done. plan <task> for the next piece, or /session new <name>"
+	}
+	return "type /help for commands"
 }
 
 func (m *Model) showHelp() {
@@ -1448,9 +1482,12 @@ func (m *Model) renderChatMessage(msg ChatMessage, w int) string {
 		return header + "\n" + body + "\n"
 
 	case kindSystem:
+		// Width must be set or long lines are clipped by the viewport edge
+		// instead of wrapping inside the panel.
 		return lipgloss.NewStyle().
 			Foreground(colorSubtle).Italic(true).
 			PaddingLeft(2).
+			Width(w - 2).
 			Render(msg.Body)
 
 	case kindSuccess:

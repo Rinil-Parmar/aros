@@ -33,9 +33,9 @@ var (
 
 var (
 	// Header — border-bottom line (OpenCodeTUI style)
+	// One row, no border: the panels directly beneath already draw a top edge,
+	// so a rule here would just be a second line doing the same job.
 	styleHeader = lipgloss.NewStyle().
-			BorderBottom(true).
-			BorderForeground(colorBorder).
 			Foreground(colorText).
 			Padding(0, 1)
 
@@ -133,4 +133,28 @@ func agentColor(name string) lipgloss.Color {
 	default:
 		return colorSubtle
 	}
+}
+
+// ── Styles added by the layout pass ────────────────────────────────────────────
+
+var (
+	styleBrand      = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
+	styleHeaderName = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+	styleHeaderDim  = lipgloss.NewStyle().Foreground(colorSubtle)
+	styleHeaderMeta = lipgloss.NewStyle().Foreground(colorSubtle)
+
+	styleMuted     = lipgloss.NewStyle().Foreground(colorSubtle)
+	styleJudgeMark = lipgloss.NewStyle().Foreground(colorJudge)
+	styleTaskTitle = lipgloss.NewStyle().Foreground(colorText)
+
+	styleSectionRule  = lipgloss.NewStyle().Foreground(colorDim)
+	styleSectionTitle = lipgloss.NewStyle().Foreground(colorMuted).Bold(true)
+
+	styleStatusBar = lipgloss.NewStyle().Padding(0, 1)
+	styleStatusKey = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
+)
+
+// styleAgentName colours a name by which agent it is.
+func styleAgentName(name string) lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(agentColor(name))
 }

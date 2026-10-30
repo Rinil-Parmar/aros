@@ -17,27 +17,29 @@ aros work
 Aros runs your project through three phases, each with a human approval checkpoint.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  PLAN                                                   │
-│  Each agent generates a plan in parallel                │
-│  → Judge synthesizes the best approach                  │
-│  → You approve (or give feedback and re-run)            │
-└────────────────────┬────────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────────┐
-│  DIVIDE                                                 │
-│  Judge breaks the plan into concrete tasks              │
-│  → Assigns each task to the best-fit agent              │
-│  → You approve the assignment table                     │
-└────────────────────┬────────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────────┐
-│  WORK                                                   │
-│  Agents execute tasks in dependency order               │
-│  → Parallel execution (configurable concurrency)        │
-│  → Agents pause and ask you for critical decisions      │
-│  → Results stored in secondmem for shared context       │
-└─────────────────────────────────────────────────────────┘
+ ◆ AROS  paramrut-api                                      3/4 tasks  1 blocked  work
+╭──────────────────────────────────────────────────╮ ╭──────────────────────────────╮
+│  paramrut-api · phase work                       │ │── Activity ──────────────────│
+│  3/4 tasks  1 blocked                            │ │ ⣾ opencode                   │
+│                                                  │ │   [task-002] pagination      │
+│  next:  work      (resume — retries blocked)     │ │                              │
+│  /help for all commands                          │ │── Agents ────────────────────│
+│▸ you                                             │ │ ★ claude   haiku             │
+│    plan add a search endpoint with pagination     │ │   opencode openai/gpt-5.4-mi │
+│                                                  │ │                              │
+│● judge                                           │ │── Tasks ─────────────────────│
+│    Introduce a SearchRequest type with Limit     │ │ ✓ Define request types claude│
+│    and Offset, validate in the handler.          │ │ ► Pagination helper  opencode│
+│                                                  │ │ ○ Wire the handler    copilot│
+│  ✓  Plan approved.                               │ │ ✗ Update OpenAPI       claude│
+╰──────────────────────────────────────────────────╯ ╰──────────────────────────────╯
+╭─ Commit 7 changed file(s)? ─────────────────────────────────────────────────────────╮
+│  [y] yes    [n] no    esc cancel                                                    │
+╰─────────────────────────────────────────────────────────────────────────────────────╯
+╭─────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯                                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────────────╯
+ esc cancel · ^y copy · ^h help · ^k clear · ^o select                   paramrut-api
 ```
 
 ---
@@ -76,7 +78,12 @@ Launch `aros` with no arguments to open the interactive TUI.
 - **Right panel** — live agent activity with spinner, model name, and latest line; configured agents list; current project and phase
 - **Approval card** — appears inline when a decision is needed; dismissed by `y` or `n`, or cancelled with `Esc`
 - **Input box** — rounded border (brand purple when active, muted when busy); spinner replaces `❯` during processing
-- **Shortcuts bar** — always-visible keyboard reference at the bottom
+- **Status bar** — keyboard reference, plus the active project on the right
+
+The frame always occupies exactly the terminal's width and height: one column
+too wide makes a terminal wrap every row, one row too tall makes it scroll, and
+either turns the layout into noise. `TestViewFitsTerminalExactly` pins that at
+seven terminal sizes, with and without the approval card.
 
 **Copying text out of the chat:** a TUI with mouse reporting enabled receives
 your click-drag instead of letting the terminal select text. Press `Ctrl+O` to
