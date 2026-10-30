@@ -158,3 +158,29 @@ var (
 func styleAgentName(name string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(agentColor(name))
 }
+
+// ── Agent markdown ─────────────────────────────────────────────────────────────
+
+var (
+	// Code gets its own surface so a command or a path is never mistaken for prose.
+	styleCodeBlock = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#C8E1FF")).
+			Background(lipgloss.Color("#1C1829"))
+	styleCodeFence  = lipgloss.NewStyle().Foreground(colorDim)
+	styleInlineCode = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#9CDCFE")).
+			Background(lipgloss.Color("#1C1829"))
+
+	styleMdHeading = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
+	styleMdBold    = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+	styleMdBullet  = lipgloss.NewStyle().Foreground(colorMuted)
+
+	// Turn headers: a dim timestamp keeps the eye on the content.
+	styleTurnTime = lipgloss.NewStyle().Foreground(colorDim)
+)
+
+var (
+	// A solid left bar reads as a turn boundary better than a dot does.
+	styleYouMark = lipgloss.NewStyle().Foreground(lipgloss.Color("#EC4899"))
+	styleYouName = lipgloss.NewStyle().Foreground(lipgloss.Color("#EC4899")).Bold(true)
+)

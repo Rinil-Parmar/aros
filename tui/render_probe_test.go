@@ -53,8 +53,24 @@ func TestRenderProbe(t *testing.T) {
 	m.showBanner()
 	m.showSessionState()
 	m.addHuman("plan add a REST endpoint for scripture search with pagination")
-	m.appendStream("judge", "Synthesised plan: introduce a SearchRequest type with Limit and Offset,")
-	m.appendStream("judge", "validate them in the handler, and return a SearchResponse carrying Total.")
+	for _, l := range []string{
+		"## Plan",
+		"Introduce a `SearchRequest` type carrying `Limit` and `Offset`, validate both in the handler, and return a `SearchResponse` with `Total`.",
+		"",
+		"- Add the types to `internal/api/search.go`",
+		"- Reject a limit above 100 with **400 Bad Request**",
+		"",
+		"```go",
+		"type SearchRequest struct {",
+		"    Query  string `json:\"query\"`",
+		"    Limit  int    `json:\"limit\"`",
+		"}",
+		"```",
+		"",
+		"Then run `go test ./internal/api -run TestSearch` to check it.",
+	} {
+		m.appendStream("judge", l)
+	}
 	m.appendStream("opencode", "Reading internal/store/search.go to find the existing query path.")
 	m.addError("task-004 blocked: agent claude failed: claude error (rate_limit)")
 	m.addSuccess("Plan approved.")

@@ -79,8 +79,10 @@ type Model struct {
 	initializing bool
 
 	// replaying is true while a saved conversation is being pushed back into
-	// the view, so the replay is not written to the log again.
+	// the view, so the replay is not written to the log again. replayAt is the
+	// original arrival time of the entry currently being replayed.
 	replaying bool
+	replayAt  time.Time
 	// chatLogBroken records that persistence failed, so the warning is shown
 	// once instead of on every message.
 	chatLogBroken bool
@@ -1399,9 +1401,28 @@ func (m *Model) showStatus() {
 // ── Message helpers ─────────────────────────────────────────────────────────────
 
 func (m *Model) addSystem(text string) {
-	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Body: text})
+	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Body: text, At: m.stamp()})
 	m.persist(state.ChatSystem, "", "", text)
 	m.refreshViewport()
+}
+
+// stamp is the time to put on a new message. During replay it is the time the
+// message originally arrived, so a resumed transcript shows real history
+// rather than the moment it was reloaded.
+func (m *Model) stamp() time.Time {
+	if !m.replayAt.IsZero() {
+		return m.replayAt
+	}
+	return time.Now()
+}
+
+// modelFor names the model an agent is configured with, for the turn header.
+// Empty for pseudo-agents like "judge" and "aros", which have no config entry.
+func (m *Model) modelFor(agentName string) string {
+	if m.cfg == nil {
+		return ""
+	}
+	return m.cfg.Agents[agentName].Model
 }
 
 // addChrome adds a line of UI furniture — banner, help, status tables, the
@@ -1410,7 +1431,7 @@ func (m *Model) addSystem(text string) {
 // small and does not grow by a greeting on every restart. Chrome is
 // regenerated on open and re-runnable with /help, /status and /agents.
 func (m *Model) addChrome(text string) {
-	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Body: text})
+	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Body: text, At: m.stamp()})
 	m.refreshViewport()
 }
 
@@ -1434,8 +1455,10 @@ func (m *Model) persist(kind, agent, model, body string) {
 }
 
 func (m *Model) addAgent(name, text string) {
-	m.messages = append(m.messages, ChatMessage{Kind: kindAgent, AgentName: name, Body: text})
-	m.persist(state.ChatAgent, name, "", text)
+	m.messages = append(m.messages, ChatMessage{
+		Kind: kindAgent, AgentName: name, ModelName: m.modelFor(name), Body: text, At: m.stamp(),
+	})
+	m.persist(state.ChatAgent, name, m.modelFor(name), text)
 	m.refreshViewport()
 }
 
@@ -1455,19 +1478,19 @@ func (m *Model) appendStream(name, line string) {
 }
 
 func (m *Model) addHuman(text string) {
-	m.messages = append(m.messages, ChatMessage{Kind: kindHuman, Body: text})
+	m.messages = append(m.messages, ChatMessage{Kind: kindHuman, Body: text, At: m.stamp()})
 	m.persist(state.ChatHuman, "", "", text)
 	m.refreshViewport()
 }
 
 func (m *Model) addError(text string) {
-	m.messages = append(m.messages, ChatMessage{Kind: kindError, Body: text})
+	m.messages = append(m.messages, ChatMessage{Kind: kindError, Body: text, At: m.stamp()})
 	m.persist(state.ChatError, "", "", text)
 	m.refreshViewport()
 }
 
 func (m *Model) addSuccess(text string) {
-	m.messages = append(m.messages, ChatMessage{Kind: kindSuccess, Body: text})
+	m.messages = append(m.messages, ChatMessage{Kind: kindSuccess, Body: text, At: m.stamp()})
 	m.persist(state.ChatSuccess, "", "", text)
 	m.refreshViewport()
 }
@@ -1481,9 +1504,10 @@ func (m *Model) replayChat() {
 		return
 	}
 	m.replaying = true
-	defer func() { m.replaying = false }()
+	defer func() { m.replaying = false; m.replayAt = time.Time{} }()
 
 	for _, e := range entries {
+		m.replayAt = e.At
 		switch e.Kind {
 		case state.ChatHuman:
 			m.addHuman(e.Body)
@@ -1520,8 +1544,13 @@ func (m *Model) refreshViewport() {
 }
 
 // renderChatMessage renders one ChatMessage block styled for the given width.
+//
+// Each role gets a distinct gutter and header so a long transcript can be
+// scanned: your turns, agent replies, and the orchestrator's own notes should
+// be tellable apart without reading them.
 func (m *Model) renderChatMessage(msg ChatMessage, w int) string {
-	bodyW := w - 6 // space for 4-char left indent + 2 safety
+	const indent = 4
+	bodyW := w - indent - 2 // gutter plus a right margin
 	if bodyW < 20 {
 		bodyW = 20
 	}
@@ -1529,53 +1558,62 @@ func (m *Model) renderChatMessage(msg ChatMessage, w int) string {
 	switch msg.Kind {
 
 	case kindBanner:
-		bannerStyle := lipgloss.NewStyle().Bold(true).Foreground(colorBrand)
 		return lipgloss.NewStyle().Width(w).Align(lipgloss.Center).
-			Render(bannerStyle.Render(msg.Body))
+			Render(lipgloss.NewStyle().Bold(true).Foreground(colorBrand).Render(msg.Body))
 
 	case kindHuman:
-		arrow := lipgloss.NewStyle().Foreground(colorBrand).Bold(true).Render("▸")
-		you := lipgloss.NewStyle().Foreground(lipgloss.Color("#EC4899")).Bold(true).Render("you")
-		badge := arrow + " " + you
-		body := lipgloss.NewStyle().Foreground(colorText).Width(bodyW).Render(msg.Body)
-		indented := lipgloss.NewStyle().PaddingLeft(4).Render(body)
-		return badge + "\n" + indented + "\n"
+		header := styleYouMark.Render("▌") + " " + styleYouName.Render("you") + m.timeSuffix(msg, w, 5)
+		body := lipgloss.NewStyle().PaddingLeft(indent).
+			Render(lipgloss.NewStyle().Foreground(colorText).Width(bodyW).Render(msg.Body))
+		return header + "\n" + body + "\n"
 
 	case kindAgent:
-		dot := lipgloss.NewStyle().Foreground(agentColor(msg.AgentName)).Render("●")
-		name := lipgloss.NewStyle().Foreground(agentColor(msg.AgentName)).Bold(true).Render(msg.AgentName)
-		header := dot + " " + name
-		if msg.ModelName != "" {
-			header += " " + lipgloss.NewStyle().Foreground(colorSubtle).Render("("+msg.ModelName+")")
+		c := agentColor(msg.AgentName)
+		header := lipgloss.NewStyle().Foreground(c).Render("▌") + " " +
+			lipgloss.NewStyle().Foreground(c).Bold(true).Render(msg.AgentName)
+		meta := msg.ModelName
+		if meta != "" {
+			header += " " + styleMuted.Render(meta)
 		}
-		var bodyLines []string
-		for _, l := range strings.Split(msg.Body, "\n") {
-			bodyLines = append(bodyLines,
-				lipgloss.NewStyle().Foreground(colorText).Width(bodyW).Render(l))
-		}
-		body := lipgloss.NewStyle().PaddingLeft(4).Render(strings.Join(bodyLines, "\n"))
+		header += m.timeSuffix(msg, w, lipgloss.Width(header))
+		// Agent output is markdown; render the subset agents actually emit.
+		body := lipgloss.NewStyle().PaddingLeft(indent).
+			Render(renderAgentBody(msg.Body, bodyW))
 		return header + "\n" + body + "\n"
 
 	case kindSystem:
-		// Width must be set or long lines are clipped by the viewport edge
-		// instead of wrapping inside the panel.
 		return lipgloss.NewStyle().
-			Foreground(colorSubtle).Italic(true).
+			Foreground(colorSubtle).
 			PaddingLeft(2).
 			Width(w - 2).
 			Render(msg.Body)
 
 	case kindSuccess:
-		icon := lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render("✓")
-		text := lipgloss.NewStyle().Foreground(colorSuccess).Width(w - 5).Render(msg.Body)
+		icon := styleTaskDone.Render("✓")
+		text := lipgloss.NewStyle().Foreground(colorSuccess).Width(w - 6).Render(msg.Body)
 		return "  " + icon + "  " + text
 
 	case kindError:
-		icon := lipgloss.NewStyle().Foreground(colorError).Bold(true).Render("✗")
-		text := lipgloss.NewStyle().Foreground(colorError).Bold(true).Width(w - 5).Render(msg.Body)
+		icon := styleActivityError.Render("✗")
+		text := lipgloss.NewStyle().Foreground(colorError).Width(w - 6).Render(msg.Body)
 		return "  " + icon + "  " + text
 	}
 	return msg.Body
+}
+
+// timeSuffix right-aligns a dim HH:MM on the header line. It answers "when did
+// this happen" — which only became answerable once the chat persisted, and
+// matters most in a replayed transcript.
+func (m *Model) timeSuffix(msg ChatMessage, w, used int) string {
+	if msg.At.IsZero() {
+		return ""
+	}
+	ts := msg.At.Format("15:04")
+	pad := w - used - lipgloss.Width(ts) - 2
+	if pad < 1 {
+		return ""
+	}
+	return strings.Repeat(" ", pad) + styleTurnTime.Render(ts)
 }
 
 func (m *Model) setMode(mode inputMode, prompt string) {

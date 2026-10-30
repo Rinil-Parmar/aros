@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/Rinil-Parmar/aros/agent"
 	"github.com/Rinil-Parmar/aros/config"
 	"github.com/Rinil-Parmar/aros/memory"
@@ -23,9 +25,10 @@ const (
 // Body stores raw text (no ANSI); rendered fresh in refreshViewport() with current width.
 type ChatMessage struct {
 	Kind      msgKind
-	AgentName string // set when Kind == kindAgent
-	ModelName string // set when Kind == kindAgent (shown in header)
-	Body      string // raw text — no pre-rendered ANSI
+	AgentName string    // set when Kind == kindAgent
+	ModelName string    // set when Kind == kindAgent (shown in header)
+	Body      string    // raw text — no pre-rendered ANSI
+	At        time.Time // when it arrived; replayed messages keep their original time
 }
 
 // --- bubbletea msg types (internal events) ---

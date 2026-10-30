@@ -85,6 +85,36 @@ too wide makes a terminal wrap every row, one row too tall makes it scroll, and
 either turns the layout into noise. `TestViewFitsTerminalExactly` pins that at
 seven terminal sizes, with and without the approval card.
 
+**Reading agent output.** Agent replies are markdown, so Aros renders the part
+that matters to a programmer rather than flat prose: fenced code blocks get
+their own framed, tinted surface, `inline code` and **bold** are highlighted,
+headings and bullets are kept. Code is clipped rather than wrapped — a wrapped
+line of code is harder to read than a truncated one, and `Ctrl+Y` / `/export`
+give you the full text. Each turn shows a left bar in the agent's colour, the
+model it used, and the time it arrived:
+
+```
+▌ judge                                                                  15:34
+    Plan
+    Introduce a SearchRequest type carrying Limit and Offset, validate both
+    in the handler, and return a SearchResponse with Total.
+
+    • Add the types to internal/api/search.go
+    • Reject a limit above 100 with 400 Bad Request
+
+    ── go ─────────────────────────────────────────────────────────────────
+    type SearchRequest struct {
+        Query  string `json:"query"`
+    }
+    ───────────────────────────────────────────────────────────────────────
+
+▌ opencode openai/gpt-5.4-mini                                           15:34
+    Reading internal/store/search.go to find the existing query path.
+```
+
+Replayed sessions keep each message's original time, so a resumed transcript
+shows real history rather than the moment it was reloaded.
+
 **Copying text out of the chat:** a TUI with mouse reporting enabled receives
 your click-drag instead of letting the terminal select text. Press `Ctrl+O` to
 hand mouse control back to the terminal and select normally (wheel scrolling is
