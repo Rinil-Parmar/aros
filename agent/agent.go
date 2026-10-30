@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -34,6 +35,40 @@ type AgentResult struct {
 	Output    string
 	Stderr    string
 	ExitCode  int
+	// SessionID is the session the vendor CLI created for this call. Every
+	// call creates a new one; recording it is what lets Aros clean up after
+	// itself when the Aros session is deleted.
+	SessionID string
+}
+
+// SessionSink is notified of every vendor session an agent call creates.
+// Set once at startup; adapters report through it so there is no need to thread
+// a recorder through every call site.
+type SessionSink func(agentName, sessionID, workDir string)
+
+var (
+	sinkMu     sync.RWMutex
+	sessionSnk SessionSink
+)
+
+// SetSessionSink installs the recorder. Passing nil disables recording.
+func SetSessionSink(f SessionSink) {
+	sinkMu.Lock()
+	sessionSnk = f
+	sinkMu.Unlock()
+}
+
+// reportSession hands one vendor session id to the sink, if any.
+func reportSession(agentName, sessionID, workDir string) {
+	if sessionID == "" {
+		return
+	}
+	sinkMu.RLock()
+	f := sessionSnk
+	sinkMu.RUnlock()
+	if f != nil {
+		f(agentName, sessionID, workDir)
+	}
 }
 
 // killGracePeriod is how long a subprocess gets after ctx cancellation before

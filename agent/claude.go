@@ -22,10 +22,11 @@ type ClaudeAdapter struct {
 }
 
 type claudeResponse struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	Result  string `json:"result"`
-	IsError bool   `json:"is_error"`
+	Type      string `json:"type"`
+	Subtype   string `json:"subtype"`
+	Result    string `json:"result"`
+	IsError   bool   `json:"is_error"`
+	SessionID string `json:"session_id"`
 }
 
 // errNoResult means stdout held no result object at all (parse failure).
@@ -70,24 +71,33 @@ func (a *ClaudeAdapter) Run(ctx context.Context, prompt string) (AgentResult, er
 
 func (a *ClaudeAdapter) exec(ctx context.Context, args []string, prompt string) (AgentResult, error) {
 	stdout, stderr, code, err := runCommand(ctx, "claude", args, a.WorkDir, strings.NewReader(prompt))
+	// The session id is reported even on failure: claude writes its transcript
+	// before the call can fail, so there is still something to clean up.
+	text, sid, parseErr := parseClaudeJSON(stdout)
+	reportSession("claude", sid, a.WorkDir)
+	res := AgentResult{AgentName: "claude", Stderr: stderr, ExitCode: code, SessionID: sid}
 	if err != nil {
-		return AgentResult{AgentName: "claude", Output: strings.TrimSpace(stdout), Stderr: stderr, ExitCode: code}, err
+		res.Output = strings.TrimSpace(stdout)
+		return res, err
 	}
-	text, parseErr := parseClaudeJSON(stdout)
 	if parseErr != nil {
 		if errors.Is(parseErr, errNoResult) {
 			// Not JSON at all (older CLI / plain text) — return raw stdout.
-			return AgentResult{AgentName: "claude", Output: strings.TrimSpace(stdout), Stderr: stderr, ExitCode: code}, nil
+			res.Output = strings.TrimSpace(stdout)
+			return res, nil
 		}
-		return AgentResult{AgentName: "claude", Output: text, Stderr: stderr, ExitCode: code}, parseErr
+		res.Output = text
+		return res, parseErr
 	}
-	return AgentResult{AgentName: "claude", Output: text, Stderr: stderr, ExitCode: code}, nil
+	res.Output = text
+	return res, nil
 }
 
 // parseClaudeJSON extracts the result text from `claude --output-format json`.
 // It returns errNoResult when no result object is present, and a descriptive
 // error (with the result text) when claude reports is_error.
-func parseClaudeJSON(raw string) (string, error) {
+// parseClaudeJSON returns the result text and the session id claude used.
+func parseClaudeJSON(raw string) (text, sessionID string, err error) {
 	// claude may emit multiple JSON objects (one per line); the last "result" wins.
 	lines := strings.Split(strings.TrimSpace(raw), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -105,10 +115,14 @@ func parseClaudeJSON(raw string) (string, error) {
 				if msg == "" {
 					msg = resp.Subtype
 				}
-				return resp.Result, fmt.Errorf("claude error (%s): %s", resp.Subtype, msg)
+				return resp.Result, resp.SessionID, fmt.Errorf("claude error (%s): %s", resp.Subtype, msg)
 			}
-			return resp.Result, nil
+			return resp.Result, resp.SessionID, nil
+		}
+		if resp.SessionID != "" {
+			// A non-result line can still name the session.
+			sessionID = resp.SessionID
 		}
 	}
-	return "", errNoResult
+	return "", sessionID, errNoResult
 }

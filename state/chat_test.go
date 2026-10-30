@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,5 +192,99 @@ func TestChatWithNoActiveSession(t *testing.T) {
 	}
 	if err := ClearChat(arosDir); err != nil {
 		t.Fatalf("clear errored with no session: %v", err)
+	}
+}
+
+// ── agent session records ──────────────────────────────────────────────────────
+
+func TestAgentSessionRecordAndLoad(t *testing.T) {
+	dir := chatDir(t)
+	id, err := ActiveSessionID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := LoadAgentSessions(dir, id); err != nil || len(got) != 0 {
+		t.Fatalf("new session should have no agent sessions: %v %v", got, err)
+	}
+
+	for _, e := range []AgentSession{
+		{Agent: "claude", ID: "c-1", WorkDir: "/w"},
+		{Agent: "opencode", ID: "o-1", WorkDir: "/w"},
+		{Agent: "claude", ID: "c-1", WorkDir: "/w"}, // duplicate
+		{Agent: "claude", ID: "", WorkDir: "/w"},    // no id: ignored on read
+	} {
+		if err := RecordAgentSession(dir, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := LoadAgentSessions(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d records, want 2 (deduped, blank id dropped): %+v", len(got), got)
+	}
+	if got[0].ID != "c-1" || got[1].ID != "o-1" {
+		t.Errorf("wrong order or ids: %+v", got)
+	}
+	if got[0].At.IsZero() {
+		t.Error("record has no timestamp")
+	}
+}
+
+// Records belong to the session that made them, so removing one session must
+// not take another's agent sessions with it.
+func TestAgentSessionsArePerSession(t *testing.T) {
+	dir := chatDir(t)
+	first, _ := ActiveSessionID(dir)
+	if err := RecordAgentSession(dir, AgentSession{Agent: "claude", ID: "first-only"}); err != nil {
+		t.Fatal(err)
+	}
+
+	second, _, err := CreateSession(dir, "two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetActiveSession(dir, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordAgentSession(dir, AgentSession{Agent: "claude", ID: "second-only"}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, _ := LoadAgentSessions(dir, first)
+	b, _ := LoadAgentSessions(dir, second.ID)
+	if len(a) != 1 || a[0].ID != "first-only" {
+		t.Errorf("first session records wrong: %+v", a)
+	}
+	if len(b) != 1 || b[0].ID != "second-only" {
+		t.Errorf("second session records wrong: %+v", b)
+	}
+}
+
+// The work phase records from several goroutines at once.
+func TestAgentSessionConcurrentRecording(t *testing.T) {
+	dir := chatDir(t)
+	id, _ := ActiveSessionID(dir)
+
+	done := make(chan struct{})
+	for i := 0; i < 20; i++ {
+		go func(n int) {
+			defer func() { done <- struct{}{} }()
+			_ = RecordAgentSession(dir, AgentSession{Agent: "claude", ID: fmt.Sprintf("s-%02d", n)})
+		}(i)
+	}
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+
+	got, err := LoadAgentSessions(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 20 {
+		t.Fatalf("got %d records, want 20 — concurrent appends interleaved", len(got))
 	}
 }

@@ -374,7 +374,8 @@ All state lives in `.aros/` inside your project directory:
         ├── session.json    # session metadata
         ├── state.json      # current phase, task, approved plan
         ├── manifest.json   # task list with assignments and statuses
-        └── chat.jsonl      # the TUI conversation, append-only
+        ├── chat.jsonl      # the TUI conversation, append-only
+        └── agent-sessions.jsonl  # vendor session ids this session created
 ```
 
 State transitions are forward-only. Use `--force` to re-run a phase, or `aros phase <phase>` to jump anywhere. In the TUI, `/phase <phase> --force` also aborts a running phase (agent subprocesses are killed).
@@ -405,6 +406,33 @@ next:  divide    (break the approved plan into tasks)
 
 Everything else was already durable: `state.json` keeps the phase and approved
 plan, `manifest.json` keeps every task's full output.
+
+---
+
+## Cleaning up
+
+Every agent call creates a **new session inside the vendor's own CLI**, stored
+outside your project — `~/.claude/projects/<slug>/<id>.jsonl`,
+opencode's sqlite store, `~/.copilot/session-state/<id>/`. Aros is the only
+thing that knows which of those were its own, so it records each id in
+`agent-sessions.jsonl` and removes them with the session:
+
+```bash
+aros session rm <id>
+# 2 agent session(s) removed, 115 KB reclaimed (of 2 recorded)
+```
+
+Each agent is cleaned the safest way available:
+
+| Agent | How | Completeness |
+|---|---|---|
+| **opencode** | `opencode session delete <id>` — its own command, so its index stays consistent | complete |
+| **claude** | deletes that one transcript file, found by id so the path slug is never guessed | complete |
+| **copilot** | removes `session-state/<id>/`; `copilot sessions` offers only `import` | partial — the sqlite row remains, and Aros says so rather than writing into another tool's database |
+
+Pass `--keep-agent-sessions` to leave them in place. Nothing outside the
+recorded ids is ever touched, and anything Aros cannot remove safely is
+reported, not guessed at.
 
 ---
 

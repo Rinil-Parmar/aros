@@ -92,13 +92,22 @@ var sessionUseCmd = &cobra.Command{
 	},
 }
 
-var sessionRemoveForce bool
+var (
+	sessionRemoveForce bool
+	sessionKeepAgents  bool
+)
 
 var sessionRemoveCmd = &cobra.Command{
 	Use:   "rm <id>",
-	Short: "Remove a session",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(_ *cobra.Command, args []string) error {
+	Short: "Remove a session and the agent sessions it created",
+	Long: `Remove an Aros session.
+
+Also deletes the claude / opencode / copilot sessions that this Aros session
+created, since those live outside the project and are otherwise orphaned —
+Aros is the only thing that knows which ones were its own.
+Pass --keep-agent-sessions to leave them in place.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
 		arosDir, err := state.ArosDir()
 		if err != nil {
 			return err
@@ -106,6 +115,13 @@ var sessionRemoveCmd = &cobra.Command{
 		activeID, _ := state.ActiveSessionID(arosDir)
 		if args[0] == activeID && !sessionRemoveForce {
 			return fmt.Errorf("cannot remove active session without --force")
+		}
+		// Clean up the vendor sessions *before* removing our own record of
+		// them — afterwards the ids are gone and the files are orphaned.
+		if !sessionKeepAgents {
+			if summary := cleanupAgentSessions(cmd.Context(), arosDir, args[0]); summary != "" {
+				fmt.Println(summary)
+			}
 		}
 		if err := state.RemoveSession(arosDir, args[0]); err != nil {
 			return err
@@ -132,6 +148,8 @@ var sessionRemoveCmd = &cobra.Command{
 
 func init() {
 	sessionRemoveCmd.Flags().BoolVar(&sessionRemoveForce, "force", false, "remove active session")
+	sessionRemoveCmd.Flags().BoolVar(&sessionKeepAgents, "keep-agent-sessions", false,
+		"do not delete the claude/opencode/copilot sessions this session created")
 	sessionCmd.AddCommand(sessionNewCmd, sessionListCmd, sessionUseCmd, sessionRemoveCmd)
 	rootCmd.AddCommand(sessionCmd)
 }

@@ -51,26 +51,33 @@ func (a *CopilotAdapter) Run(ctx context.Context, prompt string) (AgentResult, e
 
 func (a *CopilotAdapter) exec(ctx context.Context, args []string) (AgentResult, error) {
 	stdout, stderr, code, err := runCommand(ctx, "copilot", args, a.WorkDir, nil)
+	text, sid, parseErr := parseCopilotJSON(stdout)
+	reportSession("copilot", sid, a.WorkDir)
+	res := AgentResult{AgentName: "copilot", Stderr: stderr, ExitCode: code, SessionID: sid}
 	if err != nil {
-		return AgentResult{AgentName: "copilot", Output: strings.TrimSpace(stdout), Stderr: stderr, ExitCode: code}, err
+		res.Output = strings.TrimSpace(stdout)
+		return res, err
 	}
-	text, parseErr := parseCopilotJSON(stdout)
 	if parseErr != nil {
-		return AgentResult{AgentName: "copilot", Output: strings.TrimSpace(stdout), Stderr: stderr, ExitCode: code}, parseErr
+		res.Output = strings.TrimSpace(stdout)
+		return res, parseErr
 	}
-	return AgentResult{AgentName: "copilot", Output: text, Stderr: stderr, ExitCode: code}, nil
+	res.Output = text
+	return res, nil
 }
 
 type copilotEvent struct {
-	Type string `json:"type"`
-	Data struct {
+	Type      string `json:"type"`
+	SessionID string `json:"sessionId"`
+	Data      struct {
 		Content string `json:"content"`
 		Message string `json:"message"`
 	} `json:"data"`
 }
 
-// parseCopilotJSON collects all assistant.message events and concatenates their content.
-func parseCopilotJSON(raw string) (string, error) {
+// parseCopilotJSON collects all assistant.message events and concatenates their
+// content, and returns the session id copilot used.
+func parseCopilotJSON(raw string) (text, sessionID string, err error) {
 	var parts []string
 	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
 		line = strings.TrimSpace(line)
@@ -80,6 +87,9 @@ func parseCopilotJSON(raw string) (string, error) {
 		var ev copilotEvent
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			continue
+		}
+		if ev.SessionID != "" {
+			sessionID = ev.SessionID
 		}
 		switch ev.Type {
 		case "assistant.message":
@@ -94,11 +104,11 @@ func parseCopilotJSON(raw string) (string, error) {
 			if msg == "" {
 				msg = "unknown error"
 			}
-			return "", fmt.Errorf("copilot: %s", msg)
+			return "", sessionID, fmt.Errorf("copilot: %s", msg)
 		}
 	}
 	if len(parts) == 0 {
-		return "", fmt.Errorf("copilot: no assistant.message found in output")
+		return "", sessionID, fmt.Errorf("copilot: no assistant.message found in output")
 	}
-	return strings.Join(parts, "\n"), nil
+	return strings.Join(parts, "\n"), sessionID, nil
 }

@@ -23,8 +23,9 @@ type OpenCodeAdapter struct {
 // opencodeEvent represents one line of opencode's NDJSON event stream.
 // Actual format: {"type":"text","part":{"text":"..."}} or {"type":"error","error":{...}}
 type opencodeEvent struct {
-	Type string `json:"type"`
-	Part struct {
+	Type      string `json:"type"`
+	SessionID string `json:"sessionID"`
+	Part      struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"part"`
@@ -86,19 +87,25 @@ func (a *OpenCodeAdapter) Run(ctx context.Context, prompt string) (AgentResult, 
 
 func (a *OpenCodeAdapter) exec(ctx context.Context, args []string) (AgentResult, error) {
 	stdout, stderr, code, err := runCommand(ctx, "opencode", args, a.WorkDir, nil, a.env()...)
+	text, sid, parseErr := parseOpenCodeEvents(stdout)
+	reportSession("opencode", sid, a.WorkDir)
+	res := AgentResult{AgentName: a.name, Stderr: stderr, ExitCode: code, SessionID: sid}
 	if err != nil {
-		return AgentResult{AgentName: a.name, Output: strings.TrimSpace(stdout), Stderr: stderr, ExitCode: code}, err
+		res.Output = strings.TrimSpace(stdout)
+		return res, err
 	}
 	// opencode exits 0 even when the provider fails — the error lives in the event stream.
-	text, parseErr := parseOpenCodeEvents(stdout)
 	if parseErr != nil {
-		return AgentResult{AgentName: a.name, Output: strings.TrimSpace(stdout), Stderr: stderr, ExitCode: code}, parseErr
+		res.Output = strings.TrimSpace(stdout)
+		return res, parseErr
 	}
-	return AgentResult{AgentName: a.name, Output: text, Stderr: stderr, ExitCode: code}, nil
+	res.Output = text
+	return res, nil
 }
 
-// parseOpenCodeEvents reads the NDJSON event stream and extracts assistant text.
-func parseOpenCodeEvents(raw string) (string, error) {
+// parseOpenCodeEvents reads the NDJSON event stream and extracts assistant text
+// plus the session id opencode used.
+func parseOpenCodeEvents(raw string) (text, sessionID string, err error) {
 	var parts []string
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
@@ -109,6 +116,9 @@ func parseOpenCodeEvents(raw string) (string, error) {
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			continue
 		}
+		if ev.SessionID != "" {
+			sessionID = ev.SessionID
+		}
 		if ev.Type == "error" {
 			msg := ev.Error.Data.Message
 			if msg == "" {
@@ -117,14 +127,14 @@ func parseOpenCodeEvents(raw string) (string, error) {
 			if msg == "" {
 				msg = "unknown API error"
 			}
-			return "", fmt.Errorf("opencode: %s", msg)
+			return "", sessionID, fmt.Errorf("opencode: %s", msg)
 		}
 		if ev.Type == "text" && ev.Part.Text != "" {
 			parts = append(parts, ev.Part.Text)
 		}
 	}
 	if len(parts) == 0 {
-		return "", fmt.Errorf("opencode: no text events in output")
+		return "", sessionID, fmt.Errorf("opencode: no text events in output")
 	}
-	return strings.TrimSpace(strings.Join(parts, "\n")), nil
+	return strings.TrimSpace(strings.Join(parts, "\n")), sessionID, nil
 }

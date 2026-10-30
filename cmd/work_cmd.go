@@ -75,6 +75,7 @@ func runWork(_ *cobra.Command, _ []string) error {
 	}
 
 	cwd := filepath.Dir(arosDir)
+	installSessionRecorder(arosDir)
 	reg, warnings, err := agent.BuildRegistry(cfg, cwd)
 	for _, w := range warnings {
 		fmt.Println("warning:", w)
