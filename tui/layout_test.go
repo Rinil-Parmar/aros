@@ -53,7 +53,8 @@ func setApproval(m *Model) {
 }
 
 func populate(m *Model) {
-	m.showWelcome()
+	m.showBanner()
+	m.showSessionState()
 	m.addHuman("plan add a REST endpoint for scripture search with pagination")
 	m.appendStream("judge", "Synthesised plan: introduce a SearchRequest type with Limit and Offset,")
 	m.appendStream("judge", "validate them in the handler, and return a SearchResponse carrying Total.")

@@ -353,6 +353,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bootstrapMsg:
 		m.cwd = msg.cwd
 		m.arosDir = msg.arosDir
+		// Record which vendor sessions our agent calls create, so removing a
+		// session can clean up the files they leave outside the project.
+		installSessionRecorder(msg.arosDir)
 		m.cfg = msg.cfg
 		m.reg = msg.reg
 		m.mem = msg.mem
@@ -360,8 +363,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionID = msg.sessionID
 		m.sessionName = msg.sessionName
 		m.reloadManifest()
-		m.replayChat() // show where the last session left off
-		m.showWelcome()
+		// Order matters: brand at the top, then the replayed conversation,
+		// then where the work stands — oldest to newest, reading downwards.
+		m.showBanner()
+		m.replayChat()
+		m.showSessionState()
 		if msg.err != nil {
 			m.addError(msg.err.Error())
 			m.addSystem("Fix the config (aros config show) and restart.")
@@ -955,15 +961,15 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) {
 		m.showHelp()
 	case "plan_done":
 		m.addSuccess("Plan approved.")
-		m.addSystem(m.nextStepHint())
+		m.addChrome(m.nextStepHint())
 		m.clearActivity()
 	case "divide_done":
 		m.addSuccess("Tasks assigned.")
-		m.addSystem(m.nextStepHint())
+		m.addChrome(m.nextStepHint())
 		m.clearActivity()
 	case "work_done":
 		m.addSuccess("All tasks complete.")
-		m.addSystem(m.nextStepHint())
+		m.addChrome(m.nextStepHint())
 		m.clearActivity()
 	default:
 		m.clearActivity()
@@ -971,7 +977,10 @@ func (m *Model) handlePhaseResult(msg phaseResultMsg) {
 	m.setMode(modeText, "")
 }
 
-func (m *Model) showWelcome() {
+// showBanner emits the brand block. It must run *before* a replayed
+// conversation: the banner marks the start of the session, so pushing it in
+// after the history put it below months of chat, which read as broken.
+func (m *Model) showBanner() {
 	w := m.leftW
 	if w == 0 {
 		w = m.width
@@ -992,32 +1001,37 @@ func (m *Model) showWelcome() {
 	if m.height >= 28 || m.height == 0 {
 		// kindBanner so refreshViewport re-centres it on resize.
 		m.messages = append(m.messages, ChatMessage{Kind: kindBanner, Body: bannerText})
-		m.addSystem("Multi-agent AI orchestrator  ·  v0.1.0")
+		m.addChrome("Multi-agent AI orchestrator  ·  v0.1.0")
 	} else {
-		m.addSystem("◆ AROS  ·  multi-agent orchestrator  ·  v0.1.0")
+		m.addChrome("◆ AROS  ·  multi-agent orchestrator  ·  v0.1.0")
 	}
-	m.addSystem(strings.Repeat("─", max(10, w-6)))
+	m.addChrome(strings.Repeat("─", max(10, w-6)))
 
-	if m.project != nil {
-		// Show where we are and what to do next — not the manual. Sixteen
-		// lines of help on every start buries the actual state.
-		m.addSystem(fmt.Sprintf("%s · phase %s", m.project.ProjectName, m.project.Phase))
-		if m.manifest != nil && len(m.manifest.Tasks) > 0 {
-			if p := m.taskProgress(); p != "" {
-				m.addSystem(p)
-			}
-		} else if m.project.Task != "" {
-			m.addSystem("task: " + truncate(m.project.Task, 72))
-		}
-		m.addSystem("")
-		m.addSystem(m.nextStepHint())
-		m.addSystem("/help for all commands")
-		m.setMode(modeText, "")
+}
+
+// showSessionState emits where the project stands and the one command that
+// makes sense next. It runs *after* any replayed conversation, so the thing
+// you need is immediately above the input box where your eye already is.
+func (m *Model) showSessionState() {
+	if m.project == nil {
+		m.addChrome("No project here yet. Type a name to start one:")
+		m.setMode(modeText, "project name")
 		return
 	}
-
-	m.addSystem("No project here yet. Type a name to start one:")
-	m.setMode(modeText, "project name")
+	// Where we are and what to do next — not the manual. Sixteen lines of
+	// help on every start buries the actual state.
+	m.addChrome(fmt.Sprintf("%s · phase %s", m.project.ProjectName, m.project.Phase))
+	if m.manifest != nil && len(m.manifest.Tasks) > 0 {
+		if p := m.taskProgress(); p != "" {
+			m.addChrome(p)
+		}
+	} else if m.project.Task != "" {
+		m.addChrome("task: " + truncate(m.project.Task, 72))
+	}
+	m.addChrome("")
+	m.addChrome(m.nextStepHint())
+	m.addChrome("/help for all commands")
+	m.setMode(modeText, "")
 }
 
 // nextStepHint names the one command that makes sense in the current phase.
@@ -1041,7 +1055,7 @@ func (m *Model) nextStepHint() string {
 }
 
 func (m *Model) showHelp() {
-	m.addSystem("Commands:")
+	m.addChrome("Commands:")
 	for _, l := range []string{
 		"  plan <task>      generate multi-agent plan",
 		"  divide           break plan into tasks",
@@ -1071,7 +1085,7 @@ func (m *Model) showHelp() {
 		"",
 		"Any other text chats with the judge agent.",
 	} {
-		m.addSystem(l)
+		m.addChrome(l)
 	}
 }
 
@@ -1118,8 +1132,8 @@ func (m *Model) showAgents() {
 	if m.cfg == nil {
 		return
 	}
-	m.addSystem(fmt.Sprintf("Judge: %s", m.cfg.Judge.Agent))
-	m.addSystem("Agents:")
+	m.addChrome(fmt.Sprintf("Judge: %s", m.cfg.Judge.Agent))
+	m.addChrome("Agents:")
 	for _, name := range m.agentNames() {
 		ac := m.cfg.Agents[name]
 		status := "off"
@@ -1133,7 +1147,7 @@ func (m *Model) showAgents() {
 		if dense == "" {
 			dense = "off"
 		}
-		m.addSystem(fmt.Sprintf("  %-12s [%s]  model: %s  dense: %s", name, status, ac.Model, dense))
+		m.addChrome(fmt.Sprintf("  %-12s [%s]  model: %s  dense: %s", name, status, ac.Model, dense))
 	}
 }
 
@@ -1145,16 +1159,16 @@ func (m *Model) showSessions() {
 	}
 	activeID, _ := state.ActiveSessionID(m.arosDir)
 	if len(sessions) == 0 {
-		m.addSystem("No sessions found.")
+		m.addChrome("No sessions found.")
 		return
 	}
-	m.addSystem("Sessions:")
+	m.addChrome("Sessions:")
 	for _, s := range sessions {
 		prefix := " "
 		if s.ID == activeID {
 			prefix = "*"
 		}
-		m.addSystem(fmt.Sprintf("  %s %s  %s", prefix, s.ID, s.Name))
+		m.addChrome(fmt.Sprintf("  %s %s  %s", prefix, s.ID, s.Name))
 	}
 }
 
@@ -1250,7 +1264,7 @@ func (m *Model) createSession(name string) error {
 	m.messages = nil // a fresh session starts with a clean conversation
 	m.chatLogBroken = false
 	m.addSuccess(fmt.Sprintf("Session created → %s (%s)", meta.Name, meta.ID))
-	m.addSystem(m.nextStepHint())
+	m.addChrome(m.nextStepHint())
 	return nil
 }
 
@@ -1279,8 +1293,8 @@ func (m *Model) useSession(id string) error {
 	m.messages = nil
 	m.replayChat()
 	m.addSuccess(fmt.Sprintf("Active session → %s", id))
-	m.addSystem(fmt.Sprintf("%s · phase %s", s.ProjectName, s.Phase))
-	m.addSystem(m.nextStepHint())
+	m.addChrome(fmt.Sprintf("%s · phase %s", s.ProjectName, s.Phase))
+	m.addChrome(m.nextStepHint())
 	return nil
 }
 
@@ -1288,6 +1302,17 @@ func (m *Model) removeSession(id string, force bool) error {
 	activeID, _ := state.ActiveSessionID(m.arosDir)
 	if id == activeID && !force {
 		return fmt.Errorf("cannot remove active session without --force")
+	}
+	// Clean up the vendor sessions before our record of them disappears.
+	// Deleting another tool's files can block, so it runs off the event loop
+	// and reports back as ordinary chat lines.
+	if recorded, err := state.LoadAgentSessions(m.arosDir, id); err == nil && len(recorded) > 0 {
+		m.addSystem(fmt.Sprintf("cleaning up %d agent session(s)…", len(recorded)))
+		arosDir := m.arosDir
+		safeGoQuiet(func() {
+			summary := cleanupAgentSessionsTUI(arosDir, recorded)
+			send(streamLineMsg{agent: "aros", line: summary})
+		})
 	}
 	if err := state.RemoveSession(m.arosDir, id); err != nil {
 		return err
@@ -1372,23 +1397,23 @@ func firstArg(parts []string) string {
 
 func (m *Model) showStatus() {
 	if m.project == nil {
-		m.addSystem("No project loaded.")
+		m.addChrome("No project loaded.")
 		return
 	}
 	if m.sessionID != "" {
-		m.addSystem(fmt.Sprintf("Project: %s  |  Session: %s  |  Phase: %s", m.project.ProjectName, m.sessionID, m.project.Phase))
+		m.addChrome(fmt.Sprintf("Project: %s  |  Session: %s  |  Phase: %s", m.project.ProjectName, m.sessionID, m.project.Phase))
 	} else {
-		m.addSystem(fmt.Sprintf("Project: %s  |  Phase: %s", m.project.ProjectName, m.project.Phase))
+		m.addChrome(fmt.Sprintf("Project: %s  |  Phase: %s", m.project.ProjectName, m.project.Phase))
 	}
 	if m.project.Task != "" {
-		m.addSystem("Task: " + m.project.Task)
+		m.addChrome("Task: " + m.project.Task)
 	}
 	m.reloadManifest()
 	if m.manifest == nil || len(m.manifest.Tasks) == 0 {
 		return
 	}
-	m.addSystem(fmt.Sprintf("%-12s %-28s %-12s %s", "ID", "Title", "Agent", "Status"))
-	m.addSystem(strings.Repeat("─", 65))
+	m.addChrome(fmt.Sprintf("%-12s %-28s %-12s %s", "ID", "Title", "Agent", "Status"))
+	m.addChrome(strings.Repeat("─", 65))
 	for _, t := range m.manifest.Tasks {
 		icon := "○"
 		switch t.Status {
@@ -1403,7 +1428,7 @@ func (m *Model) showStatus() {
 		if t.BlockReason != "" {
 			status += "  " + truncate(t.BlockReason, 60)
 		}
-		m.addSystem(fmt.Sprintf("%s %-11s %-28s %-12s %s", icon, t.ID, truncate(t.Title, 27), t.AssignedTo, status))
+		m.addChrome(fmt.Sprintf("%s %-11s %-28s %-12s %s", icon, t.ID, truncate(t.Title, 27), t.AssignedTo, status))
 	}
 }
 
@@ -1412,6 +1437,16 @@ func (m *Model) showStatus() {
 func (m *Model) addSystem(text string) {
 	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Body: text})
 	m.persist(state.ChatSystem, "", "", text)
+	m.refreshViewport()
+}
+
+// addChrome adds a line of UI furniture — banner, help, status tables, the
+// resume divider, the next-step hint. It is deliberately *not* written to the
+// conversation log: that log holds what you and the agents said, so it stays
+// small and does not grow by a greeting on every restart. Chrome is
+// regenerated on open and re-runnable with /help, /status and /agents.
+func (m *Model) addChrome(text string) {
+	m.messages = append(m.messages, ChatMessage{Kind: kindSystem, Body: text})
 	m.refreshViewport()
 }
 
@@ -1498,8 +1533,8 @@ func (m *Model) replayChat() {
 			m.addSystem(e.Body)
 		}
 	}
-	m.addSystem("")
-	m.addSystem(fmt.Sprintf("── resumed · %d earlier message(s) above ──", len(entries)))
+	m.addChrome("")
+	m.addChrome(fmt.Sprintf("── %d earlier message(s) above · resumed ──", len(entries)))
 }
 
 // refreshViewport re-renders all messages with the current panel width and updates the viewport.

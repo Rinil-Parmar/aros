@@ -956,6 +956,23 @@ func TestChatSurvivesRestart(t *testing.T) {
 		if !strings.Contains(all, "resumed") {
 			t.Error("no resume marker after replay")
 		}
+		// Order: brand first, then history, then the state. The brand used to
+		// be pushed in after the replay, so it rendered below the whole
+		// conversation.
+		brand := strings.Index(all, "multi-agent orchestrator")
+		if brand == -1 {
+			brand = strings.Index(all, "Multi-agent AI orchestrator")
+		}
+		hist := strings.Index(all, "what should I build first?")
+		resumed := strings.Index(all, "resumed")
+		statePos := strings.LastIndex(all, "phase plan")
+		if brand == -1 || hist == -1 || resumed == -1 || statePos == -1 {
+			t.Fatalf("missing a landmark: brand=%d hist=%d resumed=%d state=%d", brand, hist, resumed, statePos)
+		}
+		if !(brand < hist && hist < resumed && resumed < statePos) {
+			t.Errorf("wrong order on resume: brand=%d history=%d resumed=%d state=%d\n%s",
+				brand, hist, resumed, statePos, all)
+		}
 		if !strings.Contains(all, "phase plan") {
 			t.Error("resumed view does not show the phase")
 		}
@@ -970,8 +987,10 @@ func TestChatSurvivesRestart(t *testing.T) {
 	h3 := h2.restart()
 	cur = h3
 	h3.waitFor("bootstrap", 15*time.Second, func(m tea.Msg) bool { _, ok := m.(bootstrapMsg); return ok })
-	if after := h3.chatLen(t); after > before+8 { // +8 allows the new session's own welcome lines
-		t.Fatalf("chat log grew from %d to %d entries across a restart — the replay is being re-logged", before, after)
+	// Exactly equal: the replay is suppressed, and the banner / state lines
+	// are chrome, so a restart must add nothing at all to the log.
+	if after := h3.chatLen(t); after != before {
+		t.Fatalf("chat log grew from %d to %d entries across a restart", before, after)
 	}
 }
 

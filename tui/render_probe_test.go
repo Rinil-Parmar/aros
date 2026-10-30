@@ -50,7 +50,8 @@ func TestRenderProbe(t *testing.T) {
 		fmt.Sscanf(v, "%dx%d", &W, &H)
 	}
 	m.Update(tea.WindowSizeMsg{Width: W, Height: H})
-	m.showWelcome()
+	m.showBanner()
+	m.showSessionState()
 	m.addHuman("plan add a REST endpoint for scripture search with pagination")
 	m.appendStream("judge", "Synthesised plan: introduce a SearchRequest type with Limit and Offset,")
 	m.appendStream("judge", "validate them in the handler, and return a SearchResponse carrying Total.")
