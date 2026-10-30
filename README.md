@@ -317,6 +317,47 @@ max_concurrent        = 2
 agent_timeout_seconds = 300
 ```
 
+### Which models can I use?
+
+Ask the agents instead of guessing — a hardcoded list goes stale and then
+suggests models that no longer exist (both of Aros's old defaults did exactly
+that):
+
+```bash
+aros models                      # every available agent
+aros models opencode             # all 75, live from `opencode models`, cached a day
+aros models opencode gpt-5.4     # just the matching ones
+aros models opencode --refresh   # ignore the cache
+```
+
+```
+opencode — 75 models, from opencode just now  (5 match "gpt-5.4")
+     openai/gpt-5.4
+     openai/gpt-5.4-fast
+  →  openai/gpt-5.4-mini          ← in use
+```
+
+Each agent reports by the best means it has, and a list Aros is unsure about
+never claims to be complete:
+
+| Agent | Source | Validation |
+|---|---|---|
+| **opencode** | `opencode models` — authoritative, cached for a day (3.7s → 0.02s) | membership in the list |
+| **claude** | no list command, so documented aliases, labelled *"not an exhaustive list"* | **free** — rejects an unknown model with no API call and no cost |
+| **copilot** | no list command, model set depends on your subscription | none; `auto` always works |
+
+In the TUI, `/model` shows what each agent is using, `/model opencode` lists,
+and `/model opencode gpt-5.4` either sets it (exact name) or filters. Setting a
+model is checked first, so a typo surfaces now rather than mid-phase:
+
+```
+$ aros config set agents.opencode.model gpt-5.4-mini
+Error: opencode does not list model "gpt-5.4-mini"
+did you mean: openai/gpt-5.4-mini, openai/gpt-5.4-mini-fast, openai/gpt-5.4-mini-flex
+```
+
+Pass `--no-verify` to set it anyway.
+
 ### Change a model or judge
 
 ```bash

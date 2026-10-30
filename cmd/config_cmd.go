@@ -34,9 +34,22 @@ var configSetCmd = &cobra.Command{
 	RunE: runConfigSet,
 }
 
+var configNoVerify bool
+
 func init() {
+	configSetCmd.Flags().BoolVar(&configNoVerify, "no-verify", false,
+		"skip checking that an agent supports the model")
 	configCmd.AddCommand(configShowCmd, configSetCmd)
 	rootCmd.AddCommand(configCmd)
+}
+
+// modelKeyAgent recognises "agents.<name>.model" and returns <name>.
+func modelKeyAgent(key string) (string, bool) {
+	parts := strings.Split(key, ".")
+	if len(parts) == 3 && parts[0] == "agents" && parts[2] == "model" {
+		return parts[1], true
+	}
+	return "", false
 }
 
 func runConfigShow(_ *cobra.Command, _ []string) error {
@@ -73,6 +86,18 @@ func runConfigSet(_ *cobra.Command, args []string) error {
 	// does not create it, so `aros config set` would fail on first use.
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
+	}
+
+	// Setting a model is the one key worth checking before it lands in the
+	// file: a wrong name is otherwise only discovered mid-phase.
+	if a, ok := modelKeyAgent(key); ok && !configNoVerify {
+		warning, verr := verifyModelChoice(a, value)
+		if verr != nil {
+			return fmt.Errorf("%w\n(use --no-verify to set it anyway)", verr)
+		}
+		if warning != "" {
+			fmt.Println("note:", warning)
+		}
 	}
 
 	// Auto-cast. Integers are tried first: strconv.ParseBool accepts "1" and

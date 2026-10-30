@@ -108,30 +108,6 @@ type Model struct {
 	quitting bool
 }
 
-// knownModels lists well-known model strings per agent type, shown as suggestions.
-var knownModels = map[string][]string{
-	"claude": {
-		"haiku",
-		"sonnet",
-		"opus",
-	},
-	"opencode": {
-		"openai/gpt-5.4-mini",
-		"openai/gpt-5.4",
-		"anthropic/claude-sonnet-4-5",
-		"anthropic/claude-haiku-4-5",
-		"google/gemini-2.5-flash",
-		"google/gemini-2.5-pro",
-		"(run `opencode models` for the full list)",
-	},
-	"copilot": {
-		"auto",
-		"gpt-5.4",
-		"claude-sonnet-4.5",
-		"(run `copilot --help` for the full list)",
-	},
-}
-
 var knownDenseLevels = []string{"off", "lite", "full", "ultra"}
 
 // program is read by send() from many goroutines and written by SetProgram, so
@@ -433,6 +409,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addError(msg.err.Error())
 		}
 		m.clearActivity()
+
+	case modelListMsg:
+		m.busy = false
+		m.phaseCancel = nil
+		if !m.live(msg.gen) {
+			break
+		}
+		m.showModelList(msg)
+
+	case modelSetMsg:
+		m.busy = false
+		m.phaseCancel = nil
+		if !m.live(msg.gen) {
+			break
+		}
+		if msg.err != nil {
+			m.addError(msg.err.Error())
+			break
+		}
+		m.applyModel(msg.agent, msg.model, msg.warning)
 
 	case manifestChangedMsg:
 		m.reloadManifest()
@@ -786,39 +782,7 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 			m.addError("configuration not loaded")
 			return nil
 		}
-		if len(parts) == 1 {
-			m.addSystem("Usage: /model <agent> <model>")
-			m.addSystem("")
-			for _, agentName := range m.agentNames() {
-				m.addSystem(fmt.Sprintf("  %s: %s", agentName, m.cfg.Agents[agentName].Model))
-				for _, mdl := range knownModels[agentName] {
-					m.addSystem("    " + mdl)
-				}
-			}
-			return nil
-		}
-		agentName := strings.ToLower(parts[1])
-		if len(parts) == 2 {
-			if models, ok := knownModels[agentName]; ok {
-				m.addSystem(fmt.Sprintf("Models for %s:", agentName))
-				for _, mdl := range models {
-					m.addSystem("  " + mdl)
-				}
-				m.addSystem(fmt.Sprintf("Usage: /model %s <model>", agentName))
-			} else {
-				m.addError(fmt.Sprintf("Unknown agent %q. Usage: /model <agent> <model>", agentName))
-			}
-			return nil
-		}
-		if m.rejectIfBusy() {
-			return nil
-		}
-		modelName := strings.Join(parts[2:], " ")
-		if err := m.setAgentModel(agentName, modelName); err != nil {
-			m.addError(err.Error())
-			return nil
-		}
-		m.addSuccess(fmt.Sprintf("Set %s model → %s  (this session only; persist with: aros config set agents.%s.model %s)", agentName, modelName, agentName, modelName))
+		return m.handleModelCmd(parts)
 
 	case "/dense":
 		if m.cfg == nil {
@@ -1063,7 +1027,7 @@ func (m *Model) showHelp() {
 		"  status           current state and tasks",
 		"",
 		"Slash commands:",
-		"  /model <agent> <model>     change model for an agent (this session)",
+		"  /model [agent] [text]      list or set an agent's model (text filters)",
 		"  /dense <agent> <level>     set dense output (off|lite|full|ultra)",
 		"  /judge <agent>             change which agent is the judge",
 		"  /agents                    show all configured agents",
