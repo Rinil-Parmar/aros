@@ -39,8 +39,17 @@ func TestParseTasks(t *testing.T) {
 	}
 }
 
+// ok builds a task that passes validation, so each test can vary one field.
+func ok(id string, deps ...string) Task {
+	return Task{ID: id, Title: "T " + id, Description: "do " + id, Dependencies: deps}
+}
+
 func TestAssignIDsAndValidate(t *testing.T) {
-	tasks := []Task{{Title: "no id"}, {ID: "b", Dependencies: []string{"c"}}, {ID: "c"}}
+	tasks := []Task{
+		{Title: "no id", Description: "fill my id"},
+		ok("b", "c"),
+		ok("c"),
+	}
 	AssignIDs(tasks)
 	if tasks[0].ID == "" || tasks[0].Status != TaskPending {
 		t.Fatalf("AssignIDs did not fill id/status: %+v", tasks[0])
@@ -49,29 +58,42 @@ func TestAssignIDsAndValidate(t *testing.T) {
 		t.Fatalf("valid graph rejected: %v", err)
 	}
 
-	dup := []Task{{ID: "x"}, {ID: "x"}}
+	dup := []Task{ok("x"), ok("x")}
 	if err := ValidateTasks(dup); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("duplicate ids not detected: %v", err)
 	}
 
-	unknown := []Task{{ID: "x", Dependencies: []string{"nope"}}}
+	unknown := []Task{ok("x", "nope")}
 	if err := ValidateTasks(unknown); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("unknown dep not detected: %v", err)
 	}
 
-	self := []Task{{ID: "x", Dependencies: []string{"x"}}}
+	self := []Task{ok("x", "x")}
 	if err := ValidateTasks(self); err == nil {
 		t.Fatal("self dependency not detected")
 	}
 
-	cyc := []Task{{ID: "a", Dependencies: []string{"b"}}, {ID: "b", Dependencies: []string{"c"}}, {ID: "c", Dependencies: []string{"a"}}}
+	cyc := []Task{ok("a", "b"), ok("b", "c"), ok("c", "a")}
 	if err := ValidateTasks(cyc); err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("cycle not detected: %v", err)
 	}
 }
 
+// An empty task still costs a full agent call, so it must be rejected at divide
+// time and sent back to the judge as feedback.
+func TestValidateRejectsEmptyTitleOrDescription(t *testing.T) {
+	noTitle := []Task{{ID: "a", Title: "   ", Description: "something"}}
+	if err := ValidateTasks(noTitle); err == nil || !strings.Contains(err.Error(), "empty title") {
+		t.Fatalf("empty title not detected: %v", err)
+	}
+	noDesc := []Task{{ID: "a", Title: "Something", Description: "\n\t "}}
+	if err := ValidateTasks(noDesc); err == nil || !strings.Contains(err.Error(), "empty description") {
+		t.Fatalf("empty description not detected: %v", err)
+	}
+}
+
 func TestNormalizeAssignments(t *testing.T) {
-	tasks := []Task{{ID: "1", AssignedTo: "Claude"}, {ID: "2", AssignedTo: "gemini"}, {ID: "3", AssignedTo: " opencode "}}
+	tasks := []Task{{ID: "1", AssignedTo: "Claude"}, {ID: "2", AssignedTo: "gemini"}, {ID: "3", AssignedTo: " opencode "}} // NormalizeAssignments does not validate
 	re := NormalizeAssignments(tasks, []string{"claude", "opencode"}, "claude")
 	if tasks[0].AssignedTo != "claude" || tasks[2].AssignedTo != "opencode" {
 		t.Fatalf("known agents not normalized: %+v", tasks)

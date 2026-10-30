@@ -32,6 +32,20 @@ func LoadState(arosDir string) (*ProjectState, error) {
 	return &s, nil
 }
 
+// LoadSessionState reads one session's state without touching the active
+// session pointer, so a caller can validate a session before switching to it.
+func LoadSessionState(arosDir, id string) (*ProjectState, error) {
+	data, err := os.ReadFile(sessionStatePath(arosDir, id))
+	if err != nil {
+		return nil, fmt.Errorf("reading state: %w", err)
+	}
+	var s ProjectState
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("parsing state: %w", err)
+	}
+	return &s, nil
+}
+
 func SaveState(arosDir string, s *ProjectState) error {
 	s.UpdatedAt = time.Now()
 	id, err := ensureActiveSessionID(arosDir)

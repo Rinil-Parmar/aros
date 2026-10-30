@@ -76,6 +76,10 @@ var sessionUseCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// Validate before switching, so a corrupt session cannot become active.
+		if _, err := state.LoadSessionState(arosDir, args[0]); err != nil {
+			return fmt.Errorf("session %q is not readable: %w", args[0], err)
+		}
 		if err := state.SetActiveSession(arosDir, args[0]); err != nil {
 			return err
 		}

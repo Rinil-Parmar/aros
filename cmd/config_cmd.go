@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -25,8 +27,8 @@ var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
 	Short: "Set a configuration value",
 	Example: `  aros config set judge.agent claude
-  aros config set agents.claude.model claude-opus-4-7
-  aros config set agents.opencode.model openai/gpt-4o
+  aros config set agents.claude.model sonnet
+  aros config set agents.opencode.model openai/gpt-5.4-mini
   aros config set work.max_concurrent 3`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConfigSet,
@@ -67,11 +69,19 @@ func runConfigSet(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Auto-cast booleans and integers
-	if b, err := strconv.ParseBool(value); err == nil {
-		v.Set(key, b)
-	} else if n, err := strconv.Atoi(value); err == nil {
+	// The config directory may not exist yet on a fresh install — WriteConfigAs
+	// does not create it, so `aros config set` would fail on first use.
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
+
+	// Auto-cast. Integers are tried first: strconv.ParseBool accepts "1" and
+	// "0", so checking bools first wrote `max_concurrent = true` into the file
+	// for `config set work.max_concurrent 1`.
+	if n, err := strconv.Atoi(value); err == nil {
 		v.Set(key, n)
+	} else if b, err := strconv.ParseBool(value); err == nil {
+		v.Set(key, b)
 	} else {
 		v.Set(key, value)
 	}

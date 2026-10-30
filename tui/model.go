@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 type inputMode int
@@ -75,6 +76,11 @@ type Model struct {
 	// initializing is true while the first session is being created, so a
 	// second line of input cannot create a duplicate project.
 	initializing bool
+
+	// mouseOff is true when mouse reporting has been turned off so the
+	// terminal's own click-drag selection works and chat text can be copied
+	// with the mouse. Scroll-wheel scrolling is unavailable while it is off.
+	mouseOff bool
 
 	// manifest is a cached copy of the active session's task list for the
 	// right panel — reloaded on manifestChangedMsg, never read from disk in View().
@@ -259,6 +265,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.addSystem("Nothing to cancel.")
 			}
 			m.recalcLayout()
+			return m, nil
+		}
+
+		// Selecting text with the mouse is impossible while a TUI has mouse
+		// reporting on — the terminal hands us the drag instead of selecting.
+		// Ctrl+O hands it back so the chat can be selected and copied normally.
+		switch key {
+		case "ctrl+o":
+			m.mouseOff = !m.mouseOff
+			if m.mouseOff {
+				m.addSystem("Mouse reporting off — drag to select and copy with your terminal. Ctrl+O to re-enable wheel scrolling.")
+				return m, tea.DisableMouse
+			}
+			m.addSystem("Mouse reporting on — wheel scrolling restored.")
+			return m, tea.EnableMouseAllMotion
+		case "ctrl+y":
+			m.copyTranscript("")
 			return m, nil
 		}
 
@@ -551,7 +574,8 @@ func (m *Model) stopChat() {
 // idle state. This is the universal escape hatch (Esc / Ctrl+G / --force).
 // Returns false if there was nothing to cancel.
 func (m *Model) cancelAll() bool {
-	had := m.busy || m.chatInProgress || m.mode == modeApproval || m.onFreeText != nil
+	had := m.busy || m.chatInProgress || m.mode == modeApproval || m.onFreeText != nil || m.initializing
+	m.initializing = false // otherwise Esc mid-creation wedges every later input
 	m.stopPhase()
 	m.stopChat()
 	m.clearActivity()
@@ -691,6 +715,24 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 	case "/clear":
 		m.messages = nil
 		m.refreshViewport()
+
+	case "/copy":
+		arg := ""
+		if len(parts) > 1 {
+			arg = strings.ToLower(parts[1])
+		}
+		m.copyTranscript(arg)
+
+	case "/export":
+		path := "aros-transcript.md"
+		if len(parts) > 1 {
+			path = strings.Join(parts[1:], " ")
+		}
+		if err := m.exportTranscript(path); err != nil {
+			m.addError(err.Error())
+		} else {
+			m.addSuccess("Transcript written to " + path)
+		}
 
 	case "/model":
 		if m.cfg == nil {
@@ -938,10 +980,14 @@ func (m *Model) showHelp() {
 		"  /agents                    show all configured agents",
 		"  /session <new|list|use|rm>  manage sessions",
 		"  /phase <phase> [--force]    set phase (init|plan|divide|work|done); --force aborts a running phase",
+		"  /copy [last|all]           copy chat to clipboard (last agent reply, or all)",
+		"  /export [file]             write the chat to a markdown file",
 		"  /clear                     clear chat history",
 		"  /help, /quit",
 		"",
 		"Esc or Ctrl+G        cancel whatever is running and return to idle",
+		"Ctrl+Y               copy the whole chat to the clipboard",
+		"Ctrl+O               toggle mouse reporting — turn it off to select text with the mouse",
 		"",
 		"Phase shortcut: Shift+Tab (cycle init → plan → divide → work → done)",
 		"Scrolling: pgup/pgdn  •  shift+up/down  •  mouse wheel",
@@ -1130,11 +1176,14 @@ func (m *Model) createSession(name string) error {
 }
 
 func (m *Model) useSession(id string) error {
-	if err := state.SetActiveSession(m.arosDir, id); err != nil {
-		return err
-	}
-	s, err := state.LoadState(m.arosDir)
+	// Load first: switching the active-session pointer and *then* failing to
+	// read the state left the pointer on the new session while m.project still
+	// held the old one, so the next save wrote the old project into it.
+	s, err := state.LoadSessionState(m.arosDir, id)
 	if err != nil {
+		return fmt.Errorf("session %q is not readable: %w", id, err)
+	}
+	if err := state.SetActiveSession(m.arosDir, id); err != nil {
 		return err
 	}
 	meta, err := state.ActiveSession(m.arosDir)
@@ -1469,5 +1518,81 @@ func (m *Model) rebuildRegistry() error {
 		return err
 	}
 	m.reg = reg
+	return nil
+}
+
+// ── Copying the chat out ────────────────────────────────────────────────────────
+
+// plainTranscript renders the chat as plain text with no ANSI styling, so it is
+// useful when pasted into an editor, an issue or a message.
+// scope "last" returns only the most recent agent reply.
+func (m *Model) plainTranscript(scope string) string {
+	if scope == "last" {
+		for i := len(m.messages) - 1; i >= 0; i-- {
+			if m.messages[i].Kind == kindAgent {
+				return m.messages[i].Body
+			}
+		}
+		return ""
+	}
+
+	var b strings.Builder
+	for _, msg := range m.messages {
+		switch msg.Kind {
+		case kindBanner:
+			continue // ASCII art is noise outside the terminal
+		case kindHuman:
+			b.WriteString("\n> " + msg.Body + "\n")
+		case kindAgent:
+			header := "\n[" + msg.AgentName
+			if msg.ModelName != "" {
+				header += " · " + msg.ModelName
+			}
+			b.WriteString(header + "]\n" + msg.Body + "\n")
+		case kindError:
+			b.WriteString("ERROR: " + msg.Body + "\n")
+		case kindSuccess:
+			b.WriteString("OK: " + msg.Body + "\n")
+		default:
+			b.WriteString(msg.Body + "\n")
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// copyTranscript puts the chat on the system clipboard using OSC 52, which the
+// terminal emulator handles — so it also works over SSH, where a clipboard
+// library running on the remote host would not.
+func (m *Model) copyTranscript(scope string) {
+	text := m.plainTranscript(scope)
+	if text == "" {
+		m.addSystem("Nothing to copy.")
+		return
+	}
+	termenv.Copy(text)
+	what := fmt.Sprintf("%d lines", strings.Count(text, "\n")+1)
+	if scope == "last" {
+		what = "last agent reply (" + what + ")"
+	} else {
+		what = "chat (" + what + ")"
+	}
+	m.addSuccess("Copied " + what + " to the clipboard.")
+	m.addSystem("If your terminal blocks OSC 52, use /export <file> or Ctrl+O then select with the mouse.")
+}
+
+// exportTranscript writes the chat to a markdown file.
+func (m *Model) exportTranscript(path string) error {
+	text := m.plainTranscript("")
+	if text == "" {
+		return fmt.Errorf("nothing to export")
+	}
+	header := "# Aros transcript\n"
+	if m.project != nil {
+		header += fmt.Sprintf("\nProject: %s  \nPhase: %s  \n", m.project.ProjectName, m.project.Phase)
+	}
+	header += fmt.Sprintf("Exported: %s\n\n```\n", time.Now().Format("2006-01-02 15:04:05"))
+	if err := os.WriteFile(path, []byte(header+text+"\n```\n"), 0644); err != nil {
+		return fmt.Errorf("writing transcript: %w", err)
+	}
 	return nil
 }

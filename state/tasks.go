@@ -105,6 +105,13 @@ func ValidateTasks(tasks []Task) error {
 			return fmt.Errorf("duplicate task id %q", t.ID)
 		}
 		idSet[t.ID] = true
+		// An agent cannot act on an empty task, and the call still costs tokens.
+		if strings.TrimSpace(t.Title) == "" {
+			return fmt.Errorf("task %q has an empty title", t.ID)
+		}
+		if strings.TrimSpace(t.Description) == "" {
+			return fmt.Errorf("task %q (%s) has an empty description", t.ID, t.Title)
+		}
 	}
 	for _, t := range tasks {
 		for _, dep := range t.Dependencies {

@@ -59,8 +59,23 @@ func runCommand(ctx context.Context, name string, args []string, workDir string,
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
-		// Negative pid targets the process group.
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		// Kill the whole process group (negative pid), not just the direct
+		// child: the agent CLIs spawn helpers that would otherwise survive and
+		// hold the stdout pipe open.
+		//
+		// SIGKILL rather than SIGTERM: these are one-shot stateless calls being
+		// aborted, so there is no graceful shutdown worth waiting for — and it
+		// lets the kill happen here, inside Cancel, which os/exec only invokes
+		// before Wait returns. That matters: a process group id *is* the
+		// leader's pid, so signalling it after the child has been reaped could
+		// hit an unrelated group that the kernel gave the recycled pid to.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone // already gone; nothing to do
+			}
+			return err
+		}
+		return nil
 	}
 	cmd.WaitDelay = killGracePeriod
 
@@ -69,10 +84,6 @@ func runCommand(ctx context.Context, name string, args []string, workDir string,
 	cmd.Stderr = &errBuf
 
 	runErr := cmd.Run()
-	if runErr != nil && cmd.Process != nil {
-		// Make sure nothing in the group survives (WaitDelay only kills the direct child).
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
 	exitCode = -1
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
