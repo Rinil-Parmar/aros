@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -34,11 +33,16 @@ var configSetCmd = &cobra.Command{
 	RunE: runConfigSet,
 }
 
-var configNoVerify bool
+var (
+	configNoVerify bool
+	configProject  bool
+)
 
 func init() {
 	configSetCmd.Flags().BoolVar(&configNoVerify, "no-verify", false,
 		"skip checking that an agent supports the model")
+	configSetCmd.Flags().BoolVar(&configProject, "project", false,
+		"write to ./.aros/config.toml instead of the global config")
 	configCmd.AddCommand(configShowCmd, configSetCmd)
 	rootCmd.AddCommand(configCmd)
 }
@@ -77,15 +81,16 @@ func runConfigShow(_ *cobra.Command, _ []string) error {
 func runConfigSet(_ *cobra.Command, args []string) error {
 	key, value := args[0], args[1]
 
-	v, path, err := config.GlobalViper(cfgFile)
-	if err != nil {
-		return err
+	path := cfgFile
+	if path == "" {
+		path = config.GlobalConfigPath()
 	}
-
-	// The config directory may not exist yet on a fresh install — WriteConfigAs
-	// does not create it, so `aros config set` would fail on first use.
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating config directory: %w", err)
+	if configProject {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		path = config.ProjectPath(cwd)
 	}
 
 	// Setting a model is the one key worth checking before it lands in the
@@ -103,16 +108,17 @@ func runConfigSet(_ *cobra.Command, args []string) error {
 	// Auto-cast. Integers are tried first: strconv.ParseBool accepts "1" and
 	// "0", so checking bools first wrote `max_concurrent = true` into the file
 	// for `config set work.max_concurrent 1`.
+	var typed any = value
 	if n, err := strconv.Atoi(value); err == nil {
-		v.Set(key, n)
+		typed = n
 	} else if b, err := strconv.ParseBool(value); err == nil {
-		v.Set(key, b)
-	} else {
-		v.Set(key, value)
+		typed = b
 	}
 
-	if err := v.WriteConfigAs(path); err != nil {
-		return fmt.Errorf("writing config to %s: %w", path, err)
+	// Writes only this key. The previous implementation serialised the whole
+	// resolved config, which baked every current default into the user's file.
+	if err := config.SetValue(path, key, typed); err != nil {
+		return err
 	}
 	fmt.Printf("Set %s = %s  (saved to %s)\n", key, value, path)
 	return nil

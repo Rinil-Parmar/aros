@@ -430,7 +430,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addError(msg.err.Error())
 			break
 		}
-		m.applyModel(msg.agent, msg.model, msg.warning)
+		m.applyModel(msg.agent, msg.model, msg.warning, msg.scope)
 
 	case manifestChangedMsg:
 		m.reloadManifest()
@@ -812,12 +812,24 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		if m.rejectIfBusy() {
 			return nil
 		}
-		agentName, level := strings.ToLower(parts[1]), strings.ToLower(parts[2])
+		dScope, dArgs := parseScope(parts[2:])
+		if len(dArgs) == 0 {
+			m.addSystem("Usage: /dense <agent> <level>")
+			return nil
+		}
+		agentName, level := strings.ToLower(parts[1]), strings.ToLower(dArgs[0])
 		if err := m.setAgentDense(agentName, level); err != nil {
 			m.addError(err.Error())
 			return nil
 		}
-		m.addSuccess(fmt.Sprintf("%s dense mode → %s", agentName, level))
+		m.addSuccess(fmt.Sprintf("%s dense → %s", agentName, level))
+		stored := level
+		if level == "off" || level == "none" {
+			stored = ""
+		}
+		m.persistSetting(dScope, func(scope config.Scope) (string, error) {
+			return config.SetAgentDense(m.cwd, agentName, stored, scope)
+		})
 
 	case "/judge":
 		if m.cfg == nil {
@@ -831,12 +843,16 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		if m.rejectIfBusy() {
 			return nil
 		}
+		jScope, _ := parseScope(parts[2:])
 		name := strings.ToLower(parts[1])
 		if err := m.setJudge(name); err != nil {
 			m.addError(err.Error())
 			return nil
 		}
-		m.addSuccess("Judge agent → " + name)
+		m.addSuccess("judge → " + name)
+		m.persistSetting(jScope, func(scope config.Scope) (string, error) {
+			return config.SetJudge(m.cwd, name, scope)
+		})
 
 	case "/session":
 		if len(parts) == 1 {
@@ -1031,6 +1047,7 @@ func (m *Model) showHelp() {
 		"Slash commands:",
 		"  /model [agent] [text]      list or set an agent's model (text filters)",
 		"  /dense <agent> <level>     set dense output (off|lite|full|ultra)",
+		"  settings are saved to .aros/config.toml · --global or --session to change that",
 		"  /judge <agent>             change which agent is the judge",
 		"  /agents                    show all configured agents",
 		"  /session <new|list|use|rm>  manage sessions",
@@ -1423,6 +1440,41 @@ func (m *Model) modelFor(agentName string) string {
 		return ""
 	}
 	return m.cfg.Agents[agentName].Model
+}
+
+// parseScope pulls --global/--session out of a command's arguments. A setting
+// is written to the project config by default: it belongs to the project you
+// are working in, not to every project you own.
+func parseScope(args []string) (config.Scope, []string) {
+	scope := config.ScopeProject
+	var rest []string
+	for _, a := range args {
+		switch a {
+		case "--global", "-g":
+			scope = config.ScopeGlobal
+		case "--session":
+			scope = scopeSession
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return scope, rest
+}
+
+// persistSetting writes a setting and reports where it landed, so a change is
+// never silently confined to the running session.
+func (m *Model) persistSetting(scope config.Scope, write func(config.Scope) (string, error)) {
+	if scope == scopeSession {
+		m.addChrome("  this session only — it will revert when you reopen")
+		return
+	}
+	path, err := write(scope)
+	if err != nil {
+		m.addError("could not save it: " + err.Error())
+		m.addChrome("  the change applies to this session only")
+		return
+	}
+	m.addChrome("  saved to " + m.shortPath(path))
 }
 
 // addChrome adds a line of UI furniture — banner, help, status tables, the

@@ -396,12 +396,21 @@ aros config set agents.opencode.model anthropic/claude-sonnet-4-5
 aros config set judge.agent opencode
 ```
 
-Or in the TUI (applies to the current session only):
+Or in the TUI, which **saves to the project config** so the choice survives
+reopening:
 
 ```
-/model claude sonnet
-/judge opencode
+/model claude sonnet          → saved to .aros/config.toml
+/judge opencode               → saved to .aros/config.toml
+/dense claude ultra           → saved to .aros/config.toml
 ```
+
+A setting belongs to the project you are working in, so that is the default.
+Add `--global` to apply it everywhere, or `--session` to try something without
+writing it anywhere. Each confirmation says which file it wrote.
+
+Writes touch **only the key you changed** — the rest of the file, including its
+comment header, is left alone.
 
 OpenCode needs provider credentials (`opencode auth login`) and the Copilot CLI needs `copilot login`; Aros surfaces their errors verbatim when a call fails.
 
@@ -420,6 +429,7 @@ strengths = ["research", "analysis"]
 
 > Full technical detail — call sites, timeouts, embeddings, retrieval tiers and
 > known limits — is in [`docs/secondmem-integration.md`](docs/secondmem-integration.md).
+
 
 Aros uses [secondmem](https://github.com/Rinil-Parmar/secondmem) as a shared knowledge layer across agents:
 

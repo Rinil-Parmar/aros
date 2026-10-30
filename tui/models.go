@@ -2,9 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/Rinil-Parmar/aros/agent"
+	"github.com/Rinil-Parmar/aros/config"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -13,6 +15,7 @@ type modelListMsg struct {
 	gen    int
 	list   agent.ModelList
 	filter string
+	scope  config.Scope
 	// setTo is non-empty when the lookup was to validate a model before using it.
 	setTo string
 }
@@ -24,6 +27,7 @@ type modelSetMsg struct {
 	model   string
 	err     error
 	warning string
+	scope   config.Scope
 }
 
 // handleModelCmd implements /model.
@@ -49,6 +53,7 @@ func (m *Model) handleModelCmd(parts []string) tea.Cmd {
 		m.addChrome("")
 		m.addChrome("/model <agent>            list what that agent supports")
 		m.addChrome("/model <agent> <text>     set it, or filter the list")
+		m.addChrome("  saved to the project config; --global for every project, --session for neither")
 		return nil
 	}
 
@@ -64,11 +69,16 @@ func (m *Model) handleModelCmd(parts []string) tea.Cmd {
 	}
 
 	refresh := false
+	scope := config.ScopeProject // a model choice belongs to the project
 	var rest []string
 	for _, p := range parts[2:] {
 		switch p {
 		case "--refresh", "-r":
 			refresh = true
+		case "--global", "-g":
+			scope = config.ScopeGlobal
+		case "--session":
+			scope = scopeSession
 		default:
 			rest = append(rest, p)
 		}
@@ -89,7 +99,7 @@ func (m *Model) handleModelCmd(parts []string) tea.Cmd {
 
 		// An exact match is a set, not a search.
 		if query != "" && list.Has(query) {
-			return modelSetMsg{gen: gen, agent: agentName, model: query}
+			return modelSetMsg{gen: gen, agent: agentName, model: query, scope: scope}
 		}
 		// A list that cannot claim completeness must still let you set a name,
 		// after verifying it where that is possible.
@@ -97,14 +107,14 @@ func (m *Model) handleModelCmd(parts []string) tea.Cmd {
 			warn := ""
 			if v, canVerify := ag.(agent.ModelVerifier); canVerify {
 				if err := v.VerifyModel(pr.ctx, query); err != nil {
-					return modelSetMsg{gen: gen, agent: agentName, model: query, err: err}
+					return modelSetMsg{gen: gen, agent: agentName, model: query, err: err, scope: scope}
 				}
 			} else {
 				warn = agentName + " cannot verify model names; if it is wrong you will see it on the next call"
 			}
-			return modelSetMsg{gen: gen, agent: agentName, model: query, warning: warn}
+			return modelSetMsg{gen: gen, agent: agentName, model: query, warning: warn, scope: scope}
 		}
-		return modelListMsg{gen: gen, list: list, filter: query}
+		return modelListMsg{gen: gen, list: list, filter: query, scope: scope}
 	}
 }
 
@@ -115,7 +125,7 @@ func (m *Model) showModelList(msg modelListMsg) {
 	matches := list.Filter(q)
 
 	if q != "" && len(matches) == 1 {
-		m.applyModel(list.Agent, matches[0], "")
+		m.applyModel(list.Agent, matches[0], "", msg.scope)
 		return
 	}
 	if q != "" && len(matches) == 0 {
@@ -154,8 +164,13 @@ func (m *Model) showModelList(msg modelListMsg) {
 	}
 }
 
-// applyModel sets the model in the running config and reports how to persist it.
-func (m *Model) applyModel(agentName, model, warning string) {
+// applyModel sets the model for the running session and writes it to the
+// config, so reopening keeps it. It used to change only the in-memory config,
+// which meant the choice silently reverted to the file's value — the default
+// haiku, for anyone without a model in their config — the next time Aros
+// opened. "This session only" was documented, but it is not what anyone
+// expects from choosing a model.
+func (m *Model) applyModel(agentName, model, warning string, scope config.Scope) {
 	if err := m.setAgentModel(agentName, model); err != nil {
 		m.addError(err.Error())
 		return
@@ -164,5 +179,30 @@ func (m *Model) applyModel(agentName, model, warning string) {
 	if warning != "" {
 		m.addChrome("  " + warning)
 	}
-	m.addChrome(fmt.Sprintf("  this session only · persist: aros config set agents.%s.model %s", agentName, model))
+	if scope == scopeSession {
+		m.addChrome("  this session only — it will revert when you reopen")
+		return
+	}
+	path, err := config.SetAgentModel(m.cwd, agentName, model, scope)
+	if err != nil {
+		m.addError("could not save it: " + err.Error())
+		m.addChrome("  the change applies to this session only")
+		return
+	}
+	m.addChrome("  saved to " + m.shortPath(path))
+}
+
+// scopeSession means "do not write this to any file".
+const scopeSession config.Scope = "session"
+
+// shortPath renders a config path relative to the project when it is inside it,
+// so the common case reads as .aros/config.toml rather than an absolute path.
+func (m *Model) shortPath(path string) string {
+	if m.cwd != "" && strings.HasPrefix(path, m.cwd+"/") {
+		return strings.TrimPrefix(path, m.cwd+"/")
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(path, home+"/") {
+		return "~/" + strings.TrimPrefix(path, home+"/")
+	}
+	return path
 }

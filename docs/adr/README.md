@@ -20,7 +20,7 @@ old one superseded.
 | [0004](0004-judge-agent-synthesises-and-assigns.md) | One judge agent synthesises plans and assigns tasks | Accepted | 2026-05-01 |
 | [0005](0005-task-manifest-as-validated-json-dag.md) | The task manifest is a validated JSON DAG | Accepted | 2026-05-02 |
 | [0006](0006-session-scoped-state-on-disk.md) | Session-scoped state on disk, written atomically | Accepted | 2026-05-03 |
-| [0007](0007-layered-toml-config.md) | Layered TOML config; runtime edits are session-only | Accepted | 2026-05-01 |
+| [0007](0007-layered-toml-config.md) | Layered TOML config; runtime edits are session-only | *Superseded in part by 0018* | 2026-05-01 |
 | [0008](0008-secondmem-optional-best-effort-memory.md) | secondmem is optional, best-effort shared memory | Accepted | 2026-05-01 |
 | [0009](0009-bubbletea-message-only-concurrency.md) | In the TUI, goroutines talk to the model only through messages | Accepted | 2026-09-17 |
 | [0010](0010-single-ui-agnostic-work-scheduler.md) | One UI-agnostic work scheduler behind a Hooks interface | Accepted | 2026-09-17 |
@@ -31,6 +31,7 @@ old one superseded.
 | [0015](0015-v2-will-be-tui-only.md) | v2 will be TUI-only, dropping the Cobra CLI | **Proposed** | 2026-05-04 |
 | [0016](0016-no-file-level-conflict-protection.md) | Parallel tasks share one working tree with no conflict protection | Accepted *(known limitation)* | 2026-09-25 |
 | [0017](0017-git-commits-behind-an-approval-gate-never-push.md) | Record agent changes as git commits behind an approval gate; never push | Accepted | 2026-10-30 |
+| [0018](0018-runtime-settings-persist-to-the-project-config.md) | Runtime settings persist to the project config, written key by key | Accepted | 2026-10-30 |
 
 ## Reading order
 

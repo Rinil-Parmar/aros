@@ -1,6 +1,6 @@
 # ADR-0007: Layered TOML config; runtime edits are session-only
 
-- **Status:** Accepted
+- **Status:** Superseded in part by [ADR-0018](0018-runtime-settings-persist-to-the-project-config.md) — runtime edits now persist
 - **Date:** 2026-05-01 (runtime-edit semantics clarified 2026-09-17)
 - **Deciders:** Rinil Parmar
 - **Related:** [ADR-0002](0002-drive-vendor-clis-as-subprocesses.md)
