@@ -173,15 +173,22 @@ func (m *Model) openModelPicker(msg modelPickMsg) {
 		}
 		return
 	}
-	items := make([]pickerItem, 0, len(list.Models))
-	for _, mdl := range list.Models {
-		items = append(items, pickerItem{label: mdl, value: mdl})
+	// Offer what the credentials can actually serve. A listed model the account
+	// refuses is worse than an absent one: you pick it and the next phase fails.
+	pool := list.Usable()
+	items := make([]pickerItem, 0, len(pool))
+	for _, mdl := range pool {
+		items = append(items, pickerItem{label: mdl, value: mdl, hint: list.Mark(mdl)})
 	}
 	current := m.cfg.Agents[msg.agentName].Model
 	p := newPicker(msg.agentName+" model", items, current, func(model string) tea.Cmd {
 		return m.selectModel(msg.agentName, model, msg.scope)
 	})
-	p.footer = list.Describe() + " · ↑↓ · type to filter · enter · esc"
+	footer := list.Describe()
+	if n := list.Rejected(); n > 0 {
+		footer = fmt.Sprintf("%d usable, %d hidden (your account cannot serve them)", len(pool), n)
+	}
+	p.footer = footer + " · ↑↓ · type to filter · enter · esc"
 	m.openPicker(p)
 }
 

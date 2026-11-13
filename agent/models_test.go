@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,5 +181,127 @@ google/gemini-3-flash
 		if got[i] != want[i] {
 			t.Fatalf("got %v, want %v", got, want)
 		}
+	}
+}
+
+// A verified list must offer only what the credentials can serve: a listed
+// model the account refuses is worse than an absent one, because you pick it
+// and the next phase fails.
+func TestUsableHidesRejectedModels(t *testing.T) {
+	l := ModelList{
+		Agent:  "opencode",
+		Source: SourceCached,
+		Models: []string{"a", "b", "c", "d"},
+		Verified: map[string]bool{
+			"a": true, "b": false, "c": true, // d never probed
+		},
+	}
+	got := l.Usable()
+	want := []string{"a", "c", "d"} // unprobed stays available
+	if len(got) != len(want) {
+		t.Fatalf("Usable() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Usable() = %v, want %v", got, want)
+		}
+	}
+	if l.Rejected() != 1 {
+		t.Errorf("Rejected() = %d, want 1", l.Rejected())
+	}
+	if l.Mark("a") != "verified" || l.Mark("b") != "rejected" || l.Mark("d") != "" {
+		t.Errorf("marks wrong: a=%q b=%q d=%q", l.Mark("a"), l.Mark("b"), l.Mark("d"))
+	}
+
+	// With no verification data, everything is on offer.
+	plain := ModelList{Models: []string{"x", "y"}, Source: SourceLive}
+	if len(plain.Usable()) != 2 {
+		t.Errorf("an unverified list must offer everything: %v", plain.Usable())
+	}
+}
+
+// switchAgent reports which model it was asked to use, and can fail on command.
+type switchAgent struct {
+	model    string
+	failWith map[string]string
+	tried    []string
+}
+
+func (s *switchAgent) Name() string { return "switcher" }
+func (s *switchAgent) Run(ctx context.Context, p string) (AgentResult, error) {
+	s.tried = append(s.tried, s.model)
+	if msg, bad := s.failWith[s.model]; bad {
+		return AgentResult{}, fmt.Errorf("%s", msg)
+	}
+	return AgentResult{Output: "OK"}, nil
+}
+func (s *switchAgent) WithModel(m string) Agent {
+	c := *s
+	c.model = m
+	c.tried = s.tried
+	return &c
+}
+
+// A timeout or rate limit says nothing about a model. Recording one as a
+// failure blacklists a good model, which is what happened on the first real
+// run: the enclosing deadline expired and every remaining model was written
+// off as unusable.
+func TestVerifyModelsDoesNotBlacklistOnTransientFailures(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	a := &switchAgent{failWith: map[string]string{
+		"m2": "429 rate limit exceeded",
+		"m3": "the model is not supported with this account",
+	}}
+	got := VerifyModels(context.Background(), a, []string{"m1", "m2", "m3", "m4"}, nil)
+
+	if works, known := got["m1"]; !known || !works {
+		t.Errorf("m1 should be recorded working: %v %v", works, known)
+	}
+	if _, known := got["m2"]; known {
+		t.Error("a rate-limited probe must not be recorded as a verdict")
+	}
+	if works, known := got["m3"]; !known || works {
+		t.Errorf("a genuine rejection should be recorded as failing: %v %v", works, known)
+	}
+	if works, known := got["m4"]; !known || !works {
+		t.Error("verification should continue past a transient failure")
+	}
+}
+
+// A cancelled run must stop and record nothing further.
+func TestVerifyModelsStopsOnCancellation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	a := &switchAgent{}
+	got := VerifyModels(ctx, a, []string{"m1", "m2"}, nil)
+	if len(got) != 0 {
+		t.Fatalf("a cancelled run recorded verdicts: %v", got)
+	}
+}
+
+func TestVerifyModelsNeedsASwitcher(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if got := VerifyModels(context.Background(), &runOnlyAgent{}, []string{"m"}, nil); got != nil {
+		t.Fatalf("an agent that cannot switch model should verify nothing: %v", got)
+	}
+}
+
+// A fresh listing must not discard what was learned about the credentials.
+func TestVerificationSurvivesARefresh(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	a := &listerAgent{name: "opencode", models: []string{"m1", "m2"}}
+	Models(context.Background(), a, false)
+	writeVerified("opencode", map[string]bool{"m1": true, "m2": false})
+
+	a.models = []string{"m1", "m2", "m3"}
+	l := Models(context.Background(), a, true) // re-query
+	if len(l.Verified) != 2 {
+		t.Fatalf("refresh lost the verification data: %+v", l.Verified)
+	}
+	if l.Rejected() != 1 {
+		t.Errorf("Rejected() = %d after refresh", l.Rejected())
 	}
 }

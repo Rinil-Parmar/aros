@@ -374,6 +374,36 @@ credential that cannot serve a model it advertises is only detectable by
 using it, which is why `--probe` exists and why it is separate: it spends a
 fraction of a cent on claude and one premium request on copilot.
 
+### Which models can my account actually use?
+
+A model appearing in an agent's list proves nothing: the account can refuse it.
+`--verify` tries each one with a single real call and remembers the answer, so
+the picker and the lists only offer models that work for *your* credentials.
+
+```bash
+aros models opencode --verify         # one real call per model; costs a little
+aros models opencode openai --verify  # just the ones matching "openai"
+aros models opencode openai           # afterwards: only what works
+aros models opencode --all            # including what your account refuses
+```
+
+```
+opencode — 80 models, cached 18m ago · 18 your account cannot use  (15 match "openai")
+  hiding 18 your account cannot use (--all to see them)
+     openai/gpt-5.6-luna        verified
+  →  openai/gpt-6.1-sol         verified
+```
+
+A measured example: with a **ChatGPT Plus** subscription, opencode serves 15 of
+its 33 `openai/*` models — the `luna`, `sol` and `terra` sub-families — and
+rejects the other 18 with *"not supported when using Codex with a ChatGPT
+account"*. That split is a property of the subscription, not of Aros, so it is
+discovered and cached rather than hardcoded.
+
+Verification never blacklists a model over a timeout, cancellation or rate
+limit: those say nothing about the model, so they are left unrecorded instead
+of recorded as a failure.
+
 ### Which models can I use?
 
 Ask the agents instead of guessing — a hardcoded list goes stale and then

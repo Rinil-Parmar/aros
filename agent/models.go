@@ -45,6 +45,53 @@ type ModelVerifier interface {
 	VerifyModel(ctx context.Context, model string) error
 }
 
+// ModelSwitcher returns a copy of the agent bound to a different model, so
+// verification can try each one in turn.
+type ModelSwitcher interface {
+	WithModel(model string) Agent
+}
+
+// VerifyModels probes each model with one minimal real call and records which
+// worked. onResult is called after each so a caller can show progress; results
+// are persisted as they arrive, so interrupting it keeps what was learned.
+func VerifyModels(ctx context.Context, a Agent, models []string, onResult func(model string, works bool, detail string)) map[string]bool {
+	sw, ok := a.(ModelSwitcher)
+	if !ok {
+		return nil
+	}
+	results := map[string]bool{}
+	if cached, found := readModelCache(a.Name()); found && len(cached.Verified) > 0 {
+		for k, v := range cached.Verified {
+			results[k] = v // keep earlier answers for models not retried
+		}
+	}
+	for _, model := range models {
+		if ctx.Err() != nil {
+			break
+		}
+		works, detail := Probe(ctx, sw.WithModel(model))
+		// A cancelled or timed-out probe says nothing about the model. Recording
+		// it as a failure would blacklist a perfectly good model — which is
+		// exactly what happened the first time this ran: the enclosing deadline
+		// expired partway through and every remaining model was written off.
+		if !works && ctx.Err() != nil {
+			break
+		}
+		if !works && isTransient(detail) {
+			if onResult != nil {
+				onResult(model, false, "skipped — "+detail)
+			}
+			continue // leave it unrecorded rather than wrong
+		}
+		results[model] = works
+		if onResult != nil {
+			onResult(model, works, detail)
+		}
+		writeVerified(a.Name(), results)
+	}
+	return results
+}
+
 // ModelSource says how a list was obtained, so the UI never presents a guess
 // as fact.
 type ModelSource string
@@ -67,6 +114,56 @@ type ModelList struct {
 	Fetched time.Time
 	// Note explains a non-live list to the user.
 	Note string
+	// Verified records which models this installation's credentials could
+	// actually serve, model -> works. Empty when never verified.
+	//
+	// It matters because a model being listed proves nothing: an account can
+	// advertise a model and still refuse it. A ChatGPT Plus subscription, for
+	// instance, serves 15 of opencode's 33 openai models and rejects the rest
+	// with "not supported when using Codex with a ChatGPT account". Only using
+	// one tells you, so Aros remembers the answer instead of hardcoding a list
+	// that would be wrong for the next person.
+	Verified   map[string]bool
+	VerifiedAt time.Time
+}
+
+// Usable returns the models worth offering: the ones verified to work, or
+// everything when nothing has been verified yet.
+func (l ModelList) Usable() []string {
+	if len(l.Verified) == 0 {
+		return l.Models
+	}
+	var out []string
+	for _, m := range l.Models {
+		if works, known := l.Verified[m]; works || !known {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// Rejected counts models verification found unusable.
+func (l ModelList) Rejected() int {
+	n := 0
+	for _, works := range l.Verified {
+		if !works {
+			n++
+		}
+	}
+	return n
+}
+
+// Mark renders a verification marker for one model.
+func (l ModelList) Mark(model string) string {
+	works, known := l.Verified[model]
+	switch {
+	case !known:
+		return ""
+	case works:
+		return "verified"
+	default:
+		return "rejected"
+	}
 }
 
 // knownModels is the fallback for agents that cannot enumerate. These are
@@ -118,6 +215,9 @@ func Models(ctx context.Context, a Agent, refresh bool) ModelList {
 	}
 
 	list := ModelList{Agent: name, Models: models, Source: SourceLive, Fetched: time.Now()}
+	if prev, found := readModelCache(name); found {
+		list.Verified, list.VerifiedAt = prev.Verified, prev.VerifiedAt
+	}
 	writeModelCache(list)
 	return list
 }
@@ -175,7 +275,11 @@ func (l ModelList) Describe() string {
 	case SourceLive:
 		return fmt.Sprintf("%d models, from %s just now", len(l.Models), l.Agent)
 	case SourceCached:
-		return fmt.Sprintf("%d models, cached %s ago", len(l.Models), time.Since(l.Fetched).Round(time.Minute))
+		s := fmt.Sprintf("%d models, cached %s ago", len(l.Models), time.Since(l.Fetched).Round(time.Minute))
+		if n := l.Rejected(); n > 0 {
+			s += fmt.Sprintf(" · %d your account cannot use", n)
+		}
+		return s
 	default:
 		return fmt.Sprintf("%d known names (not an exhaustive list)", len(l.Models))
 	}
@@ -242,8 +346,10 @@ type modelCacheFile struct {
 }
 
 type modelCacheEntry struct {
-	Models  []string  `json:"models"`
-	Fetched time.Time `json:"fetched_at"`
+	Models     []string        `json:"models"`
+	Fetched    time.Time       `json:"fetched_at"`
+	Verified   map[string]bool `json:"verified,omitempty"`
+	VerifiedAt time.Time       `json:"verified_at,omitempty"`
 }
 
 var modelCacheMu sync.Mutex
@@ -270,7 +376,36 @@ func readModelCache(agent string) (ModelList, bool) {
 	}
 	return ModelList{
 		Agent: agent, Models: e.Models, Source: SourceCached, Fetched: e.Fetched,
+		Verified: e.Verified, VerifiedAt: e.VerifiedAt,
 	}, true
+}
+
+// writeVerified stores verification results without touching the model list.
+func writeVerified(agentName string, verified map[string]bool) {
+	modelCacheMu.Lock()
+	defer modelCacheMu.Unlock()
+
+	path := modelCachePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return
+	}
+	f := modelCacheFile{Agents: map[string]modelCacheEntry{}}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &f)
+		if f.Agents == nil {
+			f.Agents = map[string]modelCacheEntry{}
+		}
+	}
+	e := f.Agents[agentName]
+	e.Verified = verified
+	e.VerifiedAt = time.Now()
+	f.Agents[agentName] = e
+	if data, err := json.MarshalIndent(f, "", "  "); err == nil {
+		tmp := path + ".tmp"
+		if os.WriteFile(tmp, data, 0644) == nil {
+			_ = os.Rename(tmp, path)
+		}
+	}
 }
 
 func writeModelCache(l ModelList) {
@@ -288,7 +423,12 @@ func writeModelCache(l ModelList) {
 			f.Agents = map[string]modelCacheEntry{}
 		}
 	}
-	f.Agents[l.Agent] = modelCacheEntry{Models: l.Models, Fetched: l.Fetched}
+	// A fresh listing must not discard what we learned about the credentials.
+	prev := f.Agents[l.Agent]
+	f.Agents[l.Agent] = modelCacheEntry{
+		Models: l.Models, Fetched: l.Fetched,
+		Verified: prev.Verified, VerifiedAt: prev.VerifiedAt,
+	}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return
@@ -361,6 +501,23 @@ func Probe(ctx context.Context, a Agent) (ok bool, detail string) {
 	return true, "replied " + fmt.Sprintf("%q", out)
 }
 
+// isTransient reports failures that are about the moment, not the model:
+// timeouts, cancellation, rate limits and network trouble. Recording one as
+// "this model does not work" would be wrong and sticky.
+func isTransient(detail string) bool {
+	d := strings.ToLower(detail)
+	for _, s := range []string{
+		"context deadline", "context canceled", "signal: killed",
+		"rate limit", "429", "too many requests",
+		"timeout", "timed out", "temporarily", "503", "502", "connection",
+	} {
+		if strings.Contains(d, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // BinaryVersion returns the agent CLI's version line, best-effort.
 func BinaryVersion(ctx context.Context, name string) string {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -370,4 +527,24 @@ func BinaryVersion(ctx context.Context, name string) string {
 		return ""
 	}
 	return firstLine([]byte(out), nil)
+}
+
+// ── binding an adapter to a different model ────────────────────────────────────
+
+func (a *ClaudeAdapter) WithModel(model string) Agent {
+	c := *a
+	c.Model = model
+	return &c
+}
+
+func (a *OpenCodeAdapter) WithModel(model string) Agent {
+	c := *a
+	c.Model = model
+	return &c
+}
+
+func (a *CopilotAdapter) WithModel(model string) Agent {
+	c := *a
+	c.Model = model
+	return &c
 }

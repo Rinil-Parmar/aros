@@ -13,7 +13,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var modelsRefresh bool
+var (
+	modelsRefresh bool
+	modelsVerify  bool
+	modelsAll     bool
+)
 
 var modelsCmd = &cobra.Command{
 	Use:   "models [agent] [filter]",
@@ -34,6 +38,10 @@ so, instead of presenting a guess as fact.
 
 func init() {
 	modelsCmd.Flags().BoolVar(&modelsRefresh, "refresh", false, "ignore the cache and re-query")
+	modelsCmd.Flags().BoolVar(&modelsVerify, "verify", false,
+		"try every model with one real call and remember which your account can serve")
+	modelsCmd.Flags().BoolVar(&modelsAll, "all", false,
+		"show models verification found unusable as well")
 	rootCmd.AddCommand(modelsCmd)
 }
 
@@ -59,7 +67,14 @@ func runModels(_ *cobra.Command, args []string) error {
 		filter = args[1]
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Verification makes one real call per model, so it needs a budget that
+	// scales with the list. A flat timeout silently truncated the run and, at
+	// the time, wrote every unprobed model off as broken.
+	budget := 2 * time.Minute
+	if modelsVerify {
+		budget = 45 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
 	names := reg.Names()
@@ -75,7 +90,39 @@ func runModels(_ *cobra.Command, args []string) error {
 			fmt.Println()
 		}
 		list := agent.Models(ctx, reg[name], modelsRefresh)
-		matches := list.Filter(filter)
+
+		if modelsVerify {
+			targets := list.Filter(filter)
+			if len(targets) == 0 {
+				targets = list.Models
+			}
+			fmt.Printf("%s — trying %d model(s) with one real call each; this costs a little and takes a while\n",
+				name, len(targets))
+			okCount := 0
+			verified := agent.VerifyModels(ctx, reg[name], targets, func(model string, works bool, detail string) {
+				if works {
+					okCount++
+					fmt.Printf("  ok    %s\n", model)
+					return
+				}
+				fmt.Printf("  no    %-34s %s\n", model, truncateLine(detail, 70))
+			})
+			if verified == nil {
+				fmt.Printf("  %s cannot be bound to a different model, so nothing was verified\n", name)
+			} else {
+				fmt.Printf("  %d of %d usable; remembered for next time\n", okCount, len(targets))
+			}
+			list = agent.Models(ctx, reg[name], false) // pick up what we learned
+		}
+
+		pool := list.Models
+		if !modelsAll {
+			pool = list.Usable()
+		}
+		matches := agent.ModelList{
+			Agent: list.Agent, Models: pool, Source: list.Source,
+			Fetched: list.Fetched, Verified: list.Verified,
+		}.Filter(filter)
 
 		fmt.Printf("%s — %s", name, list.Describe())
 		if filter != "" {
@@ -86,6 +133,10 @@ func runModels(_ *cobra.Command, args []string) error {
 			fmt.Printf("  note: %s\n", list.Note)
 		}
 
+		if n := list.Rejected(); n > 0 && !modelsAll {
+			fmt.Printf("  hiding %d your account cannot use (--all to see them)\n", n)
+		}
+
 		current := cfg.Agents[name].Model
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		for _, mdl := range matches {
@@ -93,7 +144,7 @@ func runModels(_ *cobra.Command, args []string) error {
 			if mdl == current {
 				mark = "→"
 			}
-			fmt.Fprintf(w, "  %s\t%s\n", mark, mdl)
+			fmt.Fprintf(w, "  %s\t%s\t%s\n", mark, mdl, list.Mark(mdl))
 		}
 		w.Flush()
 		if len(matches) == 0 && filter != "" {
@@ -101,6 +152,14 @@ func runModels(_ *cobra.Command, args []string) error {
 		}
 	}
 	return nil
+}
+
+func truncateLine(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 // verifyModelChoice checks a model before it is written to the config, where
