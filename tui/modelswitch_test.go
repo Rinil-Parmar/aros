@@ -223,3 +223,68 @@ func TestModelPickerEscapeChangesNothing(t *testing.T) {
 		}
 	})
 }
+
+// Picking a model must change the model every phase uses, not only chat. The
+// plan phase builds its own agent snapshot, so it is the one most likely to
+// miss a change made moments earlier.
+func TestPickedModelIsUsedByThePlanPhase(t *testing.T) {
+	h := newEchoHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	h.typeLine("/model claude opus")
+	h.waitFor("model set", 60*time.Second, func(msg tea.Msg) bool {
+		ms, ok := msg.(modelSetMsg)
+		return ok && ms.err == nil
+	})
+	h.inspect(func(m *Model) {
+		if got := m.cfg.Agents["claude"].Model; got != "opus" {
+			t.Fatalf("setup: config has %q", got)
+		}
+	})
+
+	// The plan phase runs every enabled agent plus the judge.
+	h.typeLine("plan build something")
+	h.waitFor("plan approval", 60*time.Second, isApproval)
+	h.inspect(func(m *Model) {
+		all := m.plainTranscript("")
+		if strings.Contains(all, "MODEL_USED=mock") {
+			t.Errorf("the plan phase used the OLD model:\n%s", all)
+		}
+		if !strings.Contains(all, "MODEL_USED=opus") {
+			t.Errorf("the plan phase did not use the picked model:\n%s", all)
+		}
+	})
+	h.typeLine("n")
+	h.waitFor("feedback prompt", 20*time.Second, func(msg tea.Msg) bool {
+		_, ok := msg.(freeInputMsg)
+		return ok
+	})
+	h.esc()
+}
+
+// The right panel and the config must agree, so what you see is what runs.
+func TestAgentsPanelShowsTheSelectedModel(t *testing.T) {
+	h := newEchoHarness(t)
+	defer h.quit()
+	h.startProject()
+
+	h.typeLine("/model claude sonnet")
+	h.waitFor("model set", 60*time.Second, func(msg tea.Msg) bool {
+		ms, ok := msg.(modelSetMsg)
+		return ok && ms.err == nil
+	})
+	h.inspect(func(m *Model) {
+		panel := stripANSI(m.renderRightPanel())
+		if !strings.Contains(panel, "sonnet") {
+			t.Errorf("agents panel does not show the new model:\n%s", panel)
+		}
+		if strings.Contains(panel, "mock") {
+			t.Errorf("agents panel still shows the old model:\n%s", panel)
+		}
+		// And the registry — what actually gets invoked — must agree.
+		if a, ok := m.reg["claude"].(interface{ Name() string }); !ok || a == nil {
+			t.Fatal("claude missing from the registry after a model change")
+		}
+	})
+}

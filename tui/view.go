@@ -435,9 +435,12 @@ func (m *Model) renderStatusBar() string {
 	}
 	left := strings.Join(parts, sep)
 
-	// Right side: where we are, for people who scrolled the chat away.
+	// Right side: when the chat is scrolled away from the tail, say so. New
+	// output not appearing otherwise looks like the UI has frozen.
 	right := ""
-	if m.project != nil && m.sessionID != "" {
+	if !m.viewport.AtBottom() {
+		right = styleStatusKey.Render("end") + styleMuted.Render(" jump to latest")
+	} else if m.project != nil && m.sessionID != "" {
 		right = styleMuted.Render(m.project.ProjectName)
 	}
 

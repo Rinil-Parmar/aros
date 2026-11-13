@@ -298,3 +298,76 @@ func writeModelCache(l ModelList) {
 		_ = os.Rename(tmp, path)
 	}
 }
+
+// ── health checks ──────────────────────────────────────────────────────────────
+
+// Health is the outcome of checking one agent.
+type Health struct {
+	Agent    string
+	Model    string
+	Binary   string // version line, or "" when unknown
+	ModelOK  bool
+	ModelWhy string
+	CallOK   bool // only meaningful when a probe ran
+	CallWhy  string
+	Probed   bool
+}
+
+// CheckModel verifies the configured model as cheaply as the agent allows:
+// against a live list where there is one, otherwise via a free rejection check,
+// otherwise not at all.
+func CheckModel(ctx context.Context, a Agent, model string) (ok bool, why string) {
+	if list := Models(ctx, a, false); list.Source != SourceKnown {
+		if list.Has(model) {
+			return true, fmt.Sprintf("in %s's list of %d", a.Name(), len(list.Models))
+		}
+		near := list.Filter(model)
+		if len(near) > 3 {
+			near = near[:3]
+		}
+		why = fmt.Sprintf("not in %s's list", a.Name())
+		if len(near) > 0 {
+			why += " — closest: " + strings.Join(near, ", ")
+		}
+		return false, why
+	}
+	if v, canVerify := a.(ModelVerifier); canVerify {
+		if err := v.VerifyModel(ctx, model); err != nil {
+			return false, err.Error()
+		}
+		return true, "accepted by " + a.Name()
+	}
+	return true, "cannot be checked — " + a.Name() + " offers no way to validate a name"
+}
+
+// Probe makes one minimal real call, which is the only way to know that
+// credentials actually work. It costs a little: a few hundredths of a cent for
+// claude, one premium request for copilot. Callers make it opt-in.
+func Probe(ctx context.Context, a Agent) (ok bool, detail string) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	res, err := Reason(ctx, a, "Reply with the single word: OK")
+	if err != nil {
+		return false, firstLine([]byte(err.Error()), err)
+	}
+	out := strings.TrimSpace(res.Output)
+	if out == "" {
+		return false, "the call succeeded but returned nothing"
+	}
+	if len(out) > 60 {
+		out = out[:60] + "…"
+	}
+	return true, "replied " + fmt.Sprintf("%q", out)
+}
+
+// BinaryVersion returns the agent CLI's version line, best-effort.
+func BinaryVersion(ctx context.Context, name string) string {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	out, _, _, err := runCommand(ctx, name, []string{"--version"}, "", nil)
+	if err != nil {
+		return ""
+	}
+	return firstLine([]byte(out), nil)
+}

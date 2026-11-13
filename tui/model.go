@@ -261,12 +261,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// to a clean idle state. Never leaves the UI wedged between modes.
 		switch key {
 		case "esc", "ctrl+g":
+			// Silent when there is nothing to cancel. Writing a line for a
+			// no-op keypress is noise at the best of times, and terminals emit
+			// a bare ESC inside mouse and scroll sequences — which is how
+			// "Nothing to cancel." ended up appearing in the chat while
+			// scrolling.
 			if m.cancelAll() {
 				m.addSystem("Cancelled.")
-			} else if m.textarea.Value() != "" {
-				m.textarea.Reset()
 			} else {
-				m.addSystem("Nothing to cancel.")
+				m.textarea.Reset()
 			}
 			m.recalcLayout()
 			return m, nil
@@ -1622,7 +1625,12 @@ func (m *Model) replayChat() {
 	m.addChrome(fmt.Sprintf("── %d earlier message(s) above · resumed ──", len(entries)))
 }
 
-// refreshViewport re-renders all messages with the current panel width and updates the viewport.
+// refreshViewport re-renders all messages with the current panel width.
+//
+// It follows the tail only when the view is already at the bottom. Jumping to
+// the bottom unconditionally made scrolling back through history impossible:
+// any arriving line — and during a phase they arrive constantly — dragged the
+// view away from whatever was being read.
 func (m *Model) refreshViewport() {
 	w := m.leftW
 	if w == 0 {
@@ -1632,12 +1640,21 @@ func (m *Model) refreshViewport() {
 		w = 80
 	}
 
+	follow := m.viewport.AtBottom()
+	offset := m.viewport.YOffset
+
 	var parts []string
 	for _, msg := range m.messages {
 		parts = append(parts, m.renderChatMessage(msg, w))
 	}
 	m.viewport.SetContent(strings.Join(parts, "\n"))
-	m.viewport.GotoBottom()
+
+	if follow {
+		m.viewport.GotoBottom()
+		return
+	}
+	// SetYOffset clamps, so a shrinking transcript cannot leave us past the end.
+	m.viewport.SetYOffset(offset)
 }
 
 // renderChatMessage renders one ChatMessage block styled for the given width.

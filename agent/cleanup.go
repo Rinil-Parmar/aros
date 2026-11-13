@@ -150,7 +150,10 @@ func firstLine(out []byte, fallback error) string {
 			return line
 		}
 	}
-	return fallback.Error()
+	if fallback != nil {
+		return fallback.Error()
+	}
+	return ""
 }
 
 // Merge folds another result into r.

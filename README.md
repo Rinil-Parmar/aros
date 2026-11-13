@@ -348,6 +348,32 @@ max_concurrent        = 2
 agent_timeout_seconds = 300
 ```
 
+### Is my setup actually working?
+
+```bash
+aros doctor            # binaries, configured models, judge, git, config — costs nothing
+aros doctor --probe    # also one real call per agent, the only proof credentials work
+```
+
+```
+  claude
+    ok     binary    2.1.325 (Claude Code)
+    ok     model     haiku — accepted by claude
+    ok     call      replied "OK"
+
+  opencode
+    ok     binary    1.14.48
+    ok     model     openai/gpt-5.4-mini — in opencode's list of 80
+    FAIL   call      opencode: The 'gpt-5.4-mini' model is not supported when
+                     using Codex with a ChatGPT account.
+```
+
+Note what that shows: the model is genuinely in opencode's list, so every
+check short of a real call passes — and the run would still have failed. A
+credential that cannot serve a model it advertises is only detectable by
+using it, which is why `--probe` exists and why it is separate: it spends a
+fraction of a cent on claude and one premium request on copilot.
+
 ### Which models can I use?
 
 Ask the agents instead of guessing — a hardcoded list goes stale and then
