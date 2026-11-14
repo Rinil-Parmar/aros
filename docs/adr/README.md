@@ -32,6 +32,7 @@ old one superseded.
 | [0016](0016-no-file-level-conflict-protection.md) | Parallel tasks share one working tree with no conflict protection | Accepted *(known limitation)* | 2026-09-25 |
 | [0017](0017-git-commits-behind-an-approval-gate-never-push.md) | Record agent changes as git commits behind an approval gate; never push | Accepted | 2026-10-30 |
 | [0018](0018-runtime-settings-persist-to-the-project-config.md) | Runtime settings persist to the project config, written key by key | Accepted | 2026-10-30 |
+| [0019](0019-sanitise-terminal-input-before-bubble-tea-parses-it.md) | Sanitise terminal input before Bubble Tea parses it | Accepted | 2026-11-14 |
 
 ## Reading order
 

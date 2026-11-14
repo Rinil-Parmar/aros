@@ -286,7 +286,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.DisableMouse
 			}
 			m.addSystem("Mouse reporting on — wheel scrolling restored.")
-			return m, tea.EnableMouseAllMotion
+			return m, tea.EnableMouseCellMotion
 		case "ctrl+y":
 			m.copyTranscript("")
 			return m, nil
